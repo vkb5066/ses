@@ -1,0 +1,21 @@
+#A comment goes here (comment out a line for defaults)
+
+#Algo control
+# mrun = 1 ##(1) = static diag
+ mdiag = 0 ##(0, 1, 2) = qr, jd, dav itr
+# nthreads = 6
+# nbands = 8
+# mbsmul = 1.0 
+
+# meff = 1.1 ##effective mass, units m_0
+# fstarget = 2.1 ##or maybe fstarget = 3 2.1 2.5 2.8 ...
+
+#Accuracy control
+ entol = 0.00001
+ encut = 150
+ fftbsmul = 1.0  
+
+#Read & write
+# rpsi = 0
+# wpsi = 1
+
