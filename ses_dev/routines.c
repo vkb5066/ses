@@ -86,6 +86,7 @@ void runstaticbs(job* runparams){
     }
     free(latt.sites);
     free(latt.speccounts);
+    free(pots);
 
     //here is the important part: actually calculating the eigenpairs
     //exactly how this is done depends strongly on the 'diagmode'
@@ -139,8 +140,8 @@ void runstaticbs(job* runparams){
         cfp*restrict V, *restrict Q, *restrict W;
         cfp*restrict*restrict L;
         cfp*restrict psig1, *restrict psig2;        
-        ///allocate all the reusable space we'll need
         cfp*restrict*restrict vecbuf1, *restrict*restrict vecbuf2;
+        ///allocate all the reusable space we'll need
         ham.mills = malloc(3u*maxbasis*sizeof(short));
         ham.ke = malloc(maxbasis*sizeof(fp));
         maxdavbasis = runparams->mbsmul * runparams->nbands;
@@ -152,11 +153,11 @@ void runstaticbs(job* runparams){
         psig1 = malloc(ham.dims[0]*ham.dims[1]*ham.dims[2]*sizeof(cfp));
         psig2 = malloc(ham.dims[0]*ham.dims[1]*ham.dims[2]*sizeof(cfp));
         vecbuf1 = malloc(runparams->nbands*sizeof(cfp*));
-        for(i = 0u; i < (uint)runparams->nbands; ++i) 
-            vecbuf1[i] = malloc(maxbasis*sizeof(cfp));
+        for(j = (ushort)0; j < runparams->nbands; ++j) 
+            vecbuf1[j] = malloc(maxbasis*sizeof(cfp));
         vecbuf2 = malloc(runparams->nbands*sizeof(cfp*));
-        for(i = 0u; i < (uint)runparams->nbands; ++i) 
-            vecbuf2[i] = malloc(maxbasis*sizeof(cfp));
+        for(j = (ushort)0; j < runparams->nbands; ++j) 
+            vecbuf2[j] = malloc(maxbasis*sizeof(cfp));
 
         //need to get V(r) from V(G)
         fftconv3dif(ham.dims, ham.l2dims, ham.vloc, psig1); 
@@ -204,8 +205,18 @@ void runstaticbs(job* runparams){
 
 
         ///clean up the stuff we don't need anymore (basically all but kpts)
-
-
+        free(ham.vloc);
+        free(ham.mills);
+        free(ham.ke);
+        free(V); free(Q); free(W);
+        for(i = 0u; i < maxdavbasis; ++i) free(L[i]);
+        free((cfp**)L);
+        free(psig1); free(psig2);
+        for(j = (ushort)0; j < runparams->nbands; ++j){
+            free(vecbuf1[j]);
+            free(vecbuf2[j]);
+        }
+        free((cfp**)vecbuf1); free((cfp**)vecbuf2);
 
 
     default: ///nothing needed here: diagmode is user-set or set-to-default 
