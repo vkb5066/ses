@@ -2,6 +2,49 @@
 #include "def.h"
 
 
+//Sets sensible defaults for job control, given some other info
+static forceinline void initjobdefs(const uchar nelems, 
+                                    const ushort*restrict elemcounts,
+                                    const pot*restrict pots, 
+                                    const uchar diagmode, 
+                                    job*restrict runparams){
+    uchar i;    
+    fp g2max;
+
+    //if no bands are set, a reasonable default is the number of val electrons
+    if(runparams->nbands == (ushort)0){
+        for(i = (uchar)0; i < nelems; ++i){
+            runparams->nbands += elemcounts[i] * (ushort)pots[i].nvel;
+        }
+    }
+    //if no energy cutoff is set, a reasonable default is the energy 
+    //corresponding to the maximum sampled G value in the pot files
+    if(runparams->encut < ZERO){
+        g2max = pots[0].q2hi;
+        for(i = (uchar)1; i < nelems; ++i){
+            if(pots[i].q2hi > g2max) g2max = pots[i].q2hi;
+        }
+        runparams->encut = HBARSQD_OVER_TWOM * g2max;
+    }
+    //if no energy tol is set, a reasonable value depends on the diag mode
+    //(qr < jd < dav)
+    if(runparams->entol < ZERO){
+        switch(diagmode){
+            case (uchar)0: ///qr
+                runparams->entol = DEF_QR_EPS;
+                break;
+            case (uchar)1: ///jd
+                runparams->entol = DEF_JD_EPS;
+                break;
+            case (uchar)2: ///dav
+                runparams->entol = DEF_DA_EPS;
+                break;
+            default: ///??? just set to the smallest value we have
+                runparams->entol = DEF_QR_EPS;
+        }
+    }
+}
+
 //---Testing routines-----------------------------------------------------------
 #if(COMPILE_TEST_ROUTINES)
 
@@ -19,47 +62,41 @@ void testio(job runparams){
     lat lattice; pot* pots; ushort nkpts; kpt* kpts;
     uchar err;
 
-    printf("parsing run param file (after setting defaults) ...\n");
-    INIT_RUNPARAMS(runparams);
-    err = readjob(&runparams);
-    printf("readjob() returned with exit code %hhu\n", err);
-    if(!err){ 
-        reportjob(&runparams);   
-        ///nothing to free here
-    }
-
     printf("reading kpoints file ...\n");
     err = readkpoints(&nkpts, &kpts);
     printf("readkpoints() returned with exit code %hhu\n", err);
-    if(!err){
-        reportkpoints(nkpts, kpts);
-        free(kpts);
-    }
-
+    if(!err) reportkpoints(nkpts, kpts);
+       
     printf("reading lattice file ...\n");
     err = readlattice(&lattice);    
     printf("readlattice() returned with exit code %hhu\n", err);
-    if(!err){
-        reportlattice(&lattice);
-        for(i = (uchar)0, acc=(ushort)0; i < lattice.nspecs; ++i){
-            for(j = (ushort)0; j < lattice.speccounts[i]; ++j, ++acc){
-                free(lattice.sites[acc].spec);
-            }
-        }
-        free(lattice.sites);
-        free(lattice.speccounts);
-    }
+    if(!err) reportlattice(&lattice);    
 
     printf("reading potential file ...\n");
     err = readpotential(lattice.nspecs, &pots);    
     printf("readpotential() returned with exit code %hhu\n", err);
-    if(!err){
-        reportpotential(lattice.nspecs, pots);
-        for(i = (uchar)0; i < lattice.nspecs; ++i){
-            free(pots[i].samples);
+    if(!err) reportpotential(lattice.nspecs, pots);
+
+    printf("parsing run param file, setting defaults ...\n");
+    err = readjob(&runparams);
+    initjobdefs(lattice.nspecs, lattice.speccounts, pots, runparams.diagmode,
+                &runparams);
+    printf("readjob() returned with exit code %hhu\n", err);
+    if(!err) reportjob(&runparams);   
+
+
+    free(kpts);
+    for(i = (uchar)0, acc=(ushort)0; i < lattice.nspecs; ++i){
+        for(j = (ushort)0; j < lattice.speccounts[i]; ++j, ++acc){
+            free(lattice.sites[acc].spec);
         }
-        free(pots);
     }
+    free(lattice.sites);
+    free(lattice.speccounts);
+    for(i = (uchar)0; i < lattice.nspecs; ++i){
+        free(pots[i].samples);
+    }
+    free(pots);
 }
 
 
@@ -133,7 +170,7 @@ M[35].re = (fp)-2.1015271892900690; M[35].im = (fp)+0.00000000000000000;
 
 
     //Actually use the eigensolver
-    qrh((uint)SIZE, &O, &vals, &vecs, 25u, 1.0e-5F, (uchar)1);
+    qrh((uint)SIZE, O, vals, vecs, 25u, 1.0e-5F, (uchar)1);
 
     //Print out differences in eigenvalues between known and test
     printf("diff in eigs:\n");
@@ -215,8 +252,8 @@ void testexphamilgen(job runparams){
     for(i = 0u; i < ham.npw; ++i){     ///but im lazy
         ve[i] = malloc(ham.npw*sizeof(cfp));                 
     }                 
-    buildexphamil(ham, &H);
-    uint err = qrh(ham.npw, &H, &va, &ve, 25u, 1.0e-6F, (uchar)0);
+    buildexphamil(ham, H);
+    uint err = qrh(ham.npw, H, va, ve, 25u, 1.0e-6F, (uchar)0);
     (err++);
 
 

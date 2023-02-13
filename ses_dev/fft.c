@@ -61,12 +61,11 @@ static const fp ST[32] = {
 //Based on 'Matters Computational' - Arndt  (main routine similar to 21.2.1.2)
 //         'Numerical Recipes in C' - Press (trig rec. portion)
 static forceinline void _fft1difbase(const ushort n, const uchar l2n,
-                                     cfp*restrict*restrict arr, const char sgn){
+                                     cfp*restrict arr, const char sgn){
     ushort i, j, ij, ld, m, mh, ijmh;
     fp wr, wi, cn, sn, cntmp;
     cfp u, v, umv;
 
-#define arr (*arr)
     //most of the transform
     for(ld = (ushort)l2n; ld >= (ushort)2; --ld){
         m = (ushort)1 << ld;
@@ -104,6 +103,7 @@ static forceinline void _fft1difbase(const ushort n, const uchar l2n,
                 cntmp = cn;
                 cn = wr*cn    - wi*sn;
                 sn = wi*cntmp + wr*sn;
+
             }
         }
     }
@@ -116,7 +116,6 @@ static forceinline void _fft1difbase(const ushort n, const uchar l2n,
         arr[i].re  = u.re; arr[i].im  = u.im;
         arr[ij].re = v.re; arr[ij].im = v.im;
     }
-#undef arr
 }
 
 
@@ -126,12 +125,11 @@ static forceinline void _fft1difbase(const ushort n, const uchar l2n,
 //Based on 'Matters Computational' - Arndt  (main routine similar to 21.2.1.2)
 //         'Numerical Recipes in C' - Press (trig rec. portion)
 static forceinline void _fft1ditbase(const ushort n, const uchar l2n,
-                                     cfp*restrict*restrict arr, const char sgn){
+                                     cfp*restrict arr, const char sgn){
     ushort i, j, ij, ld, m, mh, ijmh;
     fp wr, wi, cn, sn, cntmp;
     cfp u, v;
 
-#define arr (*arr)
     //explicit 1+0i multiplications
     for(i = (ushort)0; i < n; i += (ushort)2){
         ij = i + (ushort)1;
@@ -180,7 +178,6 @@ static forceinline void _fft1ditbase(const ushort n, const uchar l2n,
             }
         }
     }
-#undef arr
 }
 
 
@@ -189,7 +186,7 @@ static forceinline void _fft1ditbase(const ushort n, const uchar l2n,
 //and l2lens are log_2(lens)
 //This portion is the forward dif fft and permutes arr from ijk -> kij order
 void fftconv3dif(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
-                 cfp*restrict*restrict arr, cfp*restrict*restrict buf){
+                 cfp*restrict arr, cfp*restrict buf){
     uint i, j, k;
     uint lo, la, lb;
     const uint llens[3] = {(uint)lens[0], (uint)lens[1], (uint)lens[2]};
@@ -203,7 +200,7 @@ void fftconv3dif(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
             for(k = 0u; k < llens[2]; ++k){
                 lb = ACC3(llens[2], llens[0], j, k, i);
                 la = lo + k;   
-                (*buf)[lb].re = (*arr)[la].re; (*buf)[lb].im = (*arr)[la].im;
+                buf[lb].re = arr[la].re; buf[lb].im = arr[la].im;
             }
         }
     }
@@ -216,12 +213,12 @@ void fftconv3dif(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
             for(i = 0u; i < llens[0]; ++i){
                 la = ACC3(llens[0], llens[1], k, i, j);
                 lb = lo + i;   
-                (*arr)[la].re = (*buf)[lb].re; (*arr)[la].im = (*buf)[lb].im;
+                arr[la].re = buf[lb].re; arr[la].im = buf[lb].im;
             }
         }
     }
     //1d ffts on rows of contigious memory (index j)
-    for(k = 0u; j < llens[2]; ++k){
+    for(k = 0u; k < llens[2]; ++k){
         for(i = 0u; i < llens[0]; ++i){
             lo = ACC3(llens[0], llens[1], k, i, 0u);
             _fft1difbase(lens[1], l2lens[1], arr + lo, (char)+1);
@@ -237,7 +234,7 @@ void fftconv3dif(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
 //and l2lens are log_2(lens)
 //This portion is the backwards dit fft and permutes arr from kij -> ijk order
 void fftconv3dit(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
-                 cfp*restrict*restrict arr, cfp*restrict*restrict buf){
+                 cfp*restrict arr, cfp*restrict buf){
     uint i, j, k;
     uint lo, la, lb;
     const uint llens[3] = {(uint)lens[0], (uint)lens[1], (uint)lens[2]};
@@ -251,7 +248,7 @@ void fftconv3dit(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
             for(j = 0u; j < llens[1]; ++j){
                 lb = ACC3(llens[2], llens[0], j, k, i);
                 la = lo + j;   
-                (*buf)[lb].re = (*arr)[la].re; (*buf)[lb].im = (*arr)[la].im;
+                buf[lb].re = arr[la].re; buf[lb].im = arr[la].im;
             }
         }
     }
@@ -264,7 +261,7 @@ void fftconv3dit(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
             for(i = 0u; i < llens[0]; ++i){
                 la = ACC3(llens[1], llens[2], i, j, k);
                 lb = lo + i;   
-                (*arr)[la].re = (*buf)[lb].re; (*arr)[la].im = (*buf)[lb].im;
+                arr[la].re = buf[lb].re; arr[la].im = buf[lb].im;
             }
         }
     }

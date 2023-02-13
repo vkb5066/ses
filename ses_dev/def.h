@@ -5,7 +5,7 @@
 #include <math.h>
 
 
-#define COMPILE_TEST_ROUTINES 0
+#define COMPILE_TEST_ROUTINES 1
 #define PARALLEL 0 ///TODO: figure out pthreads so that this is useful
 
 //---Program control------------------------------------------------------------
@@ -26,6 +26,8 @@
 
 //eigensolver defaults
 #define QR_ITR_LIM 25u
+#define JD_ITR_LIM 40u
+#define DA_ITR_LIM 60u
 #if(PREC == 1)
 #define DEF_QR_EPS 1.0000000e-6F
 #define DEF_JD_EPS 1.0000000e-4F
@@ -188,15 +190,28 @@ struct hamil{
 
 //---Program-wide functions-----------------------------------------------------
 //---eigen.c: implementation of eigensolvers (qr, jacobi, dav, ...)
-uint qrh(const uint n, cfp*restrict*restrict A, 
-		 fp*restrict*restrict e, cfp*restrict*restrict*restrict V,
-		 const uint itrLim, const fp eps, const uchar vecs);
+uchar qrh(const uint n, cfp*restrict A, fp*restrict e, cfp*restrict*restrict V,
+		  const uint itrlim, const fp eps, const uchar vecs);
+uchar dav(const uint n, const hamil ham,  	 
+		  //buffer params: V, Q, W = mbs x npw, psig* = fftdim[0]*[1]*[2]
+		  //               L = pointer-to-pointer mbs x npw
+		  const uint mbs, 
+		  cfp*restrict V, cfp*restrict Q, cfp*restrict W, 
+		  cfp*restrict*restrict L,
+		  cfp*restrict psig1, cfp*restrict psig2,
+		  //initial guess params: V0 = initial guess for eigvec, dim v0rs x v0cs
+		  const uint v0rs, const uint v0cs, const cfp*restrict*restrict V0,
+		  //return params: e = rbs x 1 = vals, X = rbs x npw = vecs
+		  const uint rbs, ///(rbs is usually neigs)                                          
+		  fp*restrict e, cfp*restrict*restrict X,	
+		  //control params
+		  const uint fsm, const fp eref, const uint itrlim, const fp eps);
 
 //---fft.c: implementation of fft-like functions (a "real" fft isn't necessary)
 void fftconv3dif(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
-                 cfp*restrict*restrict arr, cfp*restrict*restrict buf);
+                 cfp*restrict arr, cfp*restrict buf);
 void fftconv3dit(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
-                 cfp*restrict*restrict arr, cfp*restrict*restrict buf);
+                 cfp*restrict arr, cfp*restrict buf);
 
 //---hamil.c: dealing with init / manip of the hamiltonian op
 void setmaxdims(const fp gcut, const fp gcutvmul, const fp B[restrict 3][3],
@@ -208,7 +223,7 @@ void sethamkin(const fp gcut2, const ushort absmillmax[restrict 3],
                hamil*restrict ham); 
 void sethamvloc(const lat lattice, const pot*restrict pots,
                 hamil*restrict ham);
-void buildexphamil(const hamil haminfo, cfp*restrict*restrict H);
+void buildexphamil(const hamil haminfo, cfp*restrict H);
 
 //---io.c: input / output
 uchar readjob(job*restrict runparams);

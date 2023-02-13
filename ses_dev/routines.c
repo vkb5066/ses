@@ -45,15 +45,17 @@ static forceinline void initjobdefs(const uchar nelems,
     }
 }
 
+
+
+
+
 //routine 1: static bandstructure
 void runstaticbs(job* runparams){
-    uchar sc; ushort j, acc;
+    uchar sc; uint i; ushort j, acc;
 
     lat latt; pot*restrict pots; ushort nkpts; kpt*restrict kpts;
     hamil ham; fp gcut; ushort maxmill[3]; uint maxbasis;    
     uchar err;
-
-    cfp*restrict A;
 
 
     puts("static band structure");
@@ -89,7 +91,8 @@ void runstaticbs(job* runparams){
     //exactly how this is done depends strongly on the 'diagmode'
     switch(runparams->diagmode){
     ///hermitian qr algo, builds explicit hamiltonians for each kpt
-    case (uchar)0:
+    case (uchar)0: //-----------------------------------------------------------
+        cfp*restrict A;
 #if(!PARALLEL)
         ///allocate all the reusable space we'll need
         ham.mills = malloc(3u*maxbasis*sizeof(short));
@@ -106,8 +109,8 @@ void runstaticbs(job* runparams){
             sethamkin(gcut*gcut, maxmill, latt.A, runparams->meff, &ham);
             kpts[j].evals = malloc(ham.npw*sizeof(fp));
             ////direct diagonalization
-            buildexphamil(ham, &A);
-            qrh(ham.npw, &A, &kpts[j].evals, &kpts[j].evecs, 
+            buildexphamil(ham, A);
+            qrh(ham.npw, A, kpts[j].evals, kpts[j].evecs, 
                 QR_ITR_LIM, runparams->entol, (uchar)0);
         }
         puts("");
@@ -123,14 +126,87 @@ void runstaticbs(job* runparams){
         break;
 
 
-    case(uchar)1:
+    case(uchar)1://-------------------------------------------------------------
         ///TODO: this will be jacobi-davidson method
         break;
 
+
     ///hermitian davidson routine, iterative solution of kpt n-1 used as a
     ///starting guess for kpt n
-    case (uchar)2:
-        break;
+    case (uchar)2://------------------------------------------------------------
+        uint maxdavbasis;
+        uint prevbasissize;
+        cfp*restrict V, *restrict Q, *restrict W;
+        cfp*restrict*restrict L;
+        cfp*restrict psig1, *restrict psig2;        
+        ///allocate all the reusable space we'll need
+        cfp*restrict*restrict vecbuf1, *restrict*restrict vecbuf2;
+        ham.mills = malloc(3u*maxbasis*sizeof(short));
+        ham.ke = malloc(maxbasis*sizeof(fp));
+        maxdavbasis = runparams->mbsmul * runparams->nbands;
+        V = malloc(maxdavbasis*maxbasis*sizeof(cfp));
+        Q = malloc(maxdavbasis*maxbasis*sizeof(cfp));
+        W = malloc(maxdavbasis*maxbasis*sizeof(cfp));
+        L = malloc(maxdavbasis*sizeof(cfp*));
+        for(i = 0u; i < maxdavbasis; ++i) L[i] = malloc(maxbasis*sizeof(cfp));
+        psig1 = malloc(ham.dims[0]*ham.dims[1]*ham.dims[2]*sizeof(cfp));
+        psig2 = malloc(ham.dims[0]*ham.dims[1]*ham.dims[2]*sizeof(cfp));
+        vecbuf1 = malloc(runparams->nbands*sizeof(cfp*));
+        for(i = 0u; i < (uint)runparams->nbands; ++i) 
+            vecbuf1[i] = malloc(maxbasis*sizeof(cfp));
+        vecbuf2 = malloc(runparams->nbands*sizeof(cfp*));
+        for(i = 0u; i < (uint)runparams->nbands; ++i) 
+            vecbuf2[i] = malloc(maxbasis*sizeof(cfp));
+
+        //need to get V(r) from V(G)
+        fftconv3dif(ham.dims, ham.l2dims, ham.vloc, psig1); 
+
+        ///to begin, do a cold-start on the first k-point with random initial
+        ///guess vectors
+        fputs("working on k-point               ", stdout);
+        printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b%05hu of %05hu", (ushort)1, nkpts);
+        ham.kp = kpts;
+        sethamkin(gcut*gcut, maxmill, latt.A, runparams->meff, &ham);
+        kpts[0].evals = malloc(ham.npw*sizeof(fp));
+        dav(ham.npw, ham, maxdavbasis, V, Q, W, L, psig1, psig2, 
+            0u, 0u, NULL, 
+            runparams->nbands, kpts[0].evals, vecbuf1, 
+            0u, ZERO, DA_ITR_LIM, runparams->entol);
+        prevbasissize = ham.npw;
+
+        ///now that we have an initial guess, move through the rest of the
+        ///k-points and interchange initial guess buffers
+        for(j = (ushort)1; j < nkpts; ++j){
+            printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b%05hu of %05hu", 
+                   j + (ushort)1, nkpts);
+            ///setup hamiltonian, kpoints
+            ham.kp = kpts + j;
+            sethamkin(gcut*gcut, maxmill, latt.A, runparams->meff, &ham);
+            kpts[j].evals = malloc(ham.npw*sizeof(fp));
+            ////iterative diagonalization
+            if(j%(ushort)2 == (ushort)1){
+                dav(ham.npw, ham, maxdavbasis, V, Q, W, L, psig1, psig2, 
+                    runparams->nbands, prevbasissize, 
+                    (const cfp*restrict*restrict)vecbuf1, 
+                    runparams->nbands, kpts[j].evals, vecbuf2, 
+                    0u, ZERO, DA_ITR_LIM, runparams->entol);
+            }
+            else{
+                dav(ham.npw, ham, maxdavbasis, V, Q, W, L, psig1, psig2, 
+                    runparams->nbands, prevbasissize, 
+                    (const cfp*restrict*restrict)vecbuf2, 
+                    runparams->nbands, kpts[j].evals, vecbuf1, 
+                    0u, ZERO, DA_ITR_LIM, runparams->entol);
+            }
+            prevbasissize = ham.npw;
+        }
+        puts("");
+
+
+        ///clean up the stuff we don't need anymore (basically all but kpts)
+
+
+
 
     default: ///nothing needed here: diagmode is user-set or set-to-default 
         break;

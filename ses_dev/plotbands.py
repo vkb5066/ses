@@ -47,7 +47,7 @@ with open("bands", 'r') as infile:
 
 #Plot the band structure: one plot for each band
 for i in range(0, nbands):
-    plt.plot(x, y[i], color="#0058fd")
+    plt.plot(x, [y_ - 6.708 for y_ in y[i]], color="#0058fd")
 #    plt.plot(x, y[i], color="#eb7c00")
 
 plt.show()

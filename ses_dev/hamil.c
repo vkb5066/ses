@@ -203,11 +203,11 @@ void sethamvloc(const lat lattice, const pot*restrict pots,
 
     //now actually set V(G)
     for(hi = (ushort)0; hi < ham->dims[0]; ++hi){
-    h = hi - hh;
+    h = (short)(hi - hh);
     for(ki = (ushort)0; ki < ham->dims[1]; ++ki){
-    k = ki - hk;
+    k = (short)(ki - hk);
     for(li = (ushort)0; li < ham->dims[2]; ++li){
-    l = li - hl;
+    l = (short)(li - hl);
         
         ///g = h*b1 + k*b2 + l*b3
         g[0] = (fp)h*B[0][0] + (fp)k*B[1][0] + (fp)l*B[2][0];
@@ -225,6 +225,7 @@ void sethamvloc(const lat lattice, const pot*restrict pots,
             loi = (ushort)sam;
             hii = loi + (ushort)1;
             if(loi >= hii || hii > pots[i].nsamples){ ///tst 0 catches underflow
+                acc += lattice.speccounts[i];
                 continue; ////no need to compute S if v is zero ... move on   
             }
             sam -= (fp)loi;
@@ -243,14 +244,15 @@ void sethamvloc(const lat lattice, const pot*restrict pots,
             ///finally, we can add to the element-wise sum V(G)
             ham->vloc[ind].re += s.re*va; ham->vloc[ind].im += s.im*va;
         }
-                
     }
     }   
     }
 
-    //Set V(G=0) = 0 for a consistent rigid band shift ... may want to change
+    //set V(G=0) = 0 for a consistent rigid band shift ... may want to change
     //this later to match exp. work functions, but 0 is fine for now
-    ind = ACC3((uint)ham->dims[1], (uint)ham->dims[2], 0u, 0u, 0u);
+    //whatever you do, DONT leave G = 0 untreated unless you want numeric issues
+    ind = ACC3((uint)ham->dims[1], (uint)ham->dims[2], 
+               (uint)hh, (uint)hk, (uint)hl); 
     ham->vloc[ind].re = ZERO; ham->vloc[ind].im = ZERO;
 
 
@@ -264,7 +266,7 @@ void sethamvloc(const lat lattice, const pot*restrict pots,
 *  Builds an explicit hamiltonian (i.e. the full basis! careful!) and fills the 
 *  pre-allocated array H with its values
 */
-void buildexphamil(const hamil haminfo, cfp*restrict*restrict H){
+void buildexphamil(const hamil haminfo, cfp*restrict H){
     uint i, j, i3, j3, indh, indv;
     short ht, kt, lt, shh, shk, shl;
 
@@ -302,20 +304,20 @@ void buildexphamil(const hamil haminfo, cfp*restrict*restrict H){
             ///potential energy term: sample vloc at gi - gj
             indv = ACC3((uint)haminfo.dims[1], (uint)haminfo.dims[2], 
                         (uint)ht, (uint)kt, (uint)lt);
-            (*H)[indh].re = haminfo.vloc[indv].re;
-            (*H)[indh].im = haminfo.vloc[indv].im;
+            H[indh].re = haminfo.vloc[indv].re;
+            H[indh].im = haminfo.vloc[indv].im;
 #if(SAFE_EXPL_HAM)
             continue;
 
             panic0:
-            (*H)[indh].re = ZERO;
-            (*H)[indh].im = ZERO;
+            H[indh].re = ZERO;
+            H[indh].im = ZERO;
 #endif          
         }
 
         ///kinetic energy term: this is slightly easier than V
-        (*H)[indh].re = haminfo.ke[i]; 
-        (*H)[indh].im = ZERO; ///dont fucking delete this
+        H[indh].re = haminfo.ke[i]; 
+        H[indh].im = ZERO; ///dont fucking delete this
         indh++;
 
         ///upper portion
@@ -341,14 +343,14 @@ void buildexphamil(const hamil haminfo, cfp*restrict*restrict H){
             ///potential energy term: sample vloc at gi - gj
             indv = ACC3((uint)haminfo.dims[1], (uint)haminfo.dims[2], 
                         (uint)ht, (uint)kt, (uint)lt);
-            (*H)[indh].re = haminfo.vloc[indv].re;
-            (*H)[indh].im = haminfo.vloc[indv].im;
+            H[indh].re = haminfo.vloc[indv].re;
+            H[indh].im = haminfo.vloc[indv].im;
 #if(SAFE_EXPL_HAM)
             continue;
 
             panic1:
-            (*H)[indh].re = ZERO;
-            (*H)[indh].im = ZERO;
+            H[indh].re = ZERO;
+            H[indh].im = ZERO;
 #endif             
         }
     }

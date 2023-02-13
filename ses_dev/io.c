@@ -36,7 +36,7 @@ uchar readjob(job*restrict runparams){
     runparams->diagmode = (uchar)2; ///okay default (to davidson) 
     runparams->nthreads = (ushort)1; ///okay default 
     runparams->nbands = (ushort)0; ///needs updated if no estimate is read in
-    runparams->mbsmul = -ONE; ///TODO: do some tests to estimate a good default for this one ... between 2 and 6?
+    runparams->mbsmul = (fp)2.0; ///TODO: do some tests to estimate a good default for this one ... between 2 and 6?
     runparams->meff = ONE; ///okay default 
     runparams->fstarget = ZERO; ///no way to estimate this ... set to zero
     runparams->entol = -ONE; ///needs updated if no value is read in 
