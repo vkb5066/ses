@@ -172,15 +172,37 @@ void sethamkin(const fp gcut2, const ushort absmillmax[restrict 3],
     ham->npw = npw;
 }
 
+/*
+* sets the array of hbar^2/2m * |G|^2 (la, size npw) in the hamiltonian
+* MIND: 'mills' must be set before this function is called!
+*/
+void sethamlap(const fp B[restrict 3][3], const fp meff, hamil*restrict ham){
+    uint i, j;
+    fp hf, kf, lf;
+    fp tmul, gvec[3];
+
+    //modify the k.e. operator with effective mass, expected in units of m0
+    tmul = HBARSQD_OVER_TWOM / meff;
+
+    for(i = 0u, j = 0u; i < ham->npw; ++i, j += 3u){
+        hf = (fp)ham->mills[j];
+        kf = (fp)ham->mills[j + 1u];
+        lf = (fp)ham->mills[j + 2u];
+
+        gvec[0] = hf*B[0][0] + kf*B[1][0] + lf*B[2][0];
+        gvec[1] = hf*B[0][1] + kf*B[1][1] + lf*B[2][1];
+        gvec[2] = hf*B[0][2] + kf*B[1][2] + lf*B[2][2];
+
+        ham->la[i] = tmul*(gvec[0]*gvec[0]+gvec[1]*gvec[1]+gvec[2]*gvec[2]);
+    }
+}
 
 /*
 *  Sets the local potential V(G) on the reciprocal space grid
-*  MIND: replace lattice->A with B before using, set atom cartesian crds,
-*        and make sure vloc is memset to zero
+*  MIND: set atom cartesian crds, make sure vloc is memset to zero before use
 */
-void sethamvloc(const lat lattice, const pot*restrict pots,
-                hamil*restrict ham){
-#define B lattice.A
+void sethamvloc(const lat lattice, const fp B[restrict 3][3],
+                const pot*restrict pots, hamil*restrict ham){
     ushort i, j;
     short h, k, l;
     ushort hh, hk, hl, hi, ki, li;
@@ -224,7 +246,7 @@ void sethamvloc(const lat lattice, const pot*restrict pots,
             sam = (g2 - pots[i].q2lo)*invdqs[i];
             loi = (ushort)sam;
             hii = loi + (ushort)1;
-            if(loi >= hii || hii > pots[i].nsamples){ ///tst 0 catches underflow
+            if(loi >= hii || hii >= pots[i].nsamples){ ///tst 0 catch underflow
                 acc += lattice.speccounts[i];
                 continue; ////no need to compute S if v is zero ... move on   
             }
@@ -258,7 +280,6 @@ void sethamvloc(const lat lattice, const pot*restrict pots,
 
     free(invcounts);
     free(invdqs);
-#undef B
 }
 
 

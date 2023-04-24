@@ -1,18 +1,21 @@
 #A comment goes here (comment out a line for defaults)
 
 #Algo control
- mrun = 1 ##(1) = static diag
- mdiag = 2 ##(0, 1, 2) = qr, jd, dav itr
+ ilim = 20000
+ mrun = 1 ##(1) = (static diag)
+ mdiag = 3 ##(0, 1, 2, 3) = qr, jd, dav itr, lopcg itr
 # nthreads = 6
- nbands = 8
- mbsmul = 6.25 
+ nbands = 4
 
-# meff = 1.08 ##effective mass, units m_0
-# fstarget = 2.1 ##or maybe fstarget = 3 2.1 2.5 2.8 ...
+# davmbsmul = 4.00 ##must be at least 2.0 
+ lcgstab = 1
+
+ meff = 1.00 #1.08 ##effective mass, units m_0
+ fstarget = 8.8 #8.4 #7.95 #6.8 7.9 ##will write a band structure file for each energy
 
 #Accuracy control
- entol = 1e-5
- encut = 150
+ entol = 1e-4
+ encut = 125
  fftbsmul = 1.0  
 
 #Read & write

@@ -1,4 +1,5 @@
 //Contains main function routines that are called from main
+#include <string.h>
 #include "def.h"
 
 
@@ -59,18 +60,20 @@ static forceinline void _tstcmul(const cfp a, const cfp b, cfp* res){
 //routine id 50: test basic io functions
 void testio(job runparams){
     uchar i; ushort j, acc;
-    lat lattice; pot* pots; ushort nkpts; kpt* kpts;
+    lat lattice; fp B[3][3]; pot* pots; ushort nkpts; kpt* kpts;
     uchar err;
-
-    printf("reading kpoints file ...\n");
-    err = readkpoints(&nkpts, &kpts);
-    printf("readkpoints() returned with exit code %hhu\n", err);
-    if(!err) reportkpoints(nkpts, kpts);
        
     printf("reading lattice file ...\n");
     err = readlattice(&lattice);    
     printf("readlattice() returned with exit code %hhu\n", err);
     if(!err) reportlattice(&lattice);    
+
+    memcpy(B, lattice.A, 9*sizeof(fp));
+    torecipbasis(B);
+    printf("reading kpoints file ...\n");
+    err = readkpoints(B, &nkpts, &kpts);
+    printf("readkpoints() returned with exit code %hhu\n", err);
+    if(!err) reportkpoints(nkpts, kpts);
 
     printf("reading potential file ...\n");
     err = readpotential(lattice.nspecs, &pots);    
@@ -217,7 +220,7 @@ M[35].re = (fp)-2.1015271892900690; M[35].im = (fp)+0.00000000000000000;
 void testexphamilgen(job runparams){
     uint i;
     uchar ii; ushort acc, j;
-    lat lattice; pot* pots; ushort nkpts; kpt* kpts;
+    lat lattice; fp B[3][3]; pot* pots; ushort nkpts; kpt* kpts;
     hamil ham;
     ushort maxmill[3]; uint maxbasis;    
 
@@ -226,23 +229,25 @@ void testexphamilgen(job runparams){
 
     readlattice(&lattice);
     readpotential(lattice.nspecs, &pots);
-    readkpoints(&nkpts, &kpts);
+    memcpy(B, lattice.A, 9*sizeof(fp));
+    torecipbasis(B);
+    readkpoints(B, &nkpts, &kpts);
 
     tocrdsc(&lattice);
-    torecipbasis(lattice.A);
+ 
 
     gcut = SQRT(runparams.encut/HBARSQD_OVER_TWOM);
-    setmaxdims(gcut, runparams.fftgmul, lattice.A, nkpts, kpts,
+    setmaxdims(gcut, runparams.fftgmul, B, nkpts, kpts,
                maxmill, ham.dims, ham.l2dims, &maxbasis);
 
     //setup the hamiltonian
     ham.vloc = calloc(ham.dims[0]*ham.dims[1]*ham.dims[2], sizeof(cfp));
-    sethamvloc(lattice, pots, &ham);
+    sethamvloc(lattice, B, pots, &ham);
 
     ham.kp = kpts;   
     ham.mills = malloc(3u*maxbasis*sizeof(short));
     ham.ke = malloc(maxbasis*sizeof(fp));
-    sethamkin(gcut*gcut, maxmill, lattice.A, runparams.meff, &ham);
+    sethamkin(gcut*gcut, maxmill, B, runparams.meff, &ham);
  
 
 

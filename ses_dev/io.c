@@ -24,7 +24,7 @@ uchar readjob(job*restrict runparams){
     char line[LINESIZE_MAX];
     char* next;    
     uint i;
-    uchar eq;
+    uchar eq, j;
 
     if(!(infile = fopen(INFILE_RUNPARAMS, "r"))) return (uchar)1;    
     
@@ -36,9 +36,11 @@ uchar readjob(job*restrict runparams){
     runparams->diagmode = (uchar)2; ///okay default (to davidson) 
     runparams->nthreads = (ushort)1; ///okay default 
     runparams->nbands = (ushort)0; ///needs updated if no estimate is read in
+    runparams->itrlim = (ushort)0; ///needs updated if no value read in
     runparams->mbsmul = (fp)2.0; ///TODO: do some tests to estimate a good default for this one ... between 2 and 6?
+    runparams->stab = (uchar)1; ///okay default
     runparams->meff = ONE; ///okay default 
-    runparams->fstarget = ZERO; ///no way to estimate this ... set to zero
+    runparams->nfstargets = (uchar)0; ///okay default
     runparams->entol = -ONE; ///needs updated if no value is read in 
     runparams->encut = -ONE; ///needs updated if no value is read in
     runparams->fftgmul = ONE; ///okay default 
@@ -88,9 +90,19 @@ uchar readjob(job*restrict runparams){
             runparams->nbands = (ushort)atoi(next);
             continue;
         }
-        if(!strcmp("mbsmul", next)){
+        if(!strcmp("ilim", next)){
+            next = strtok(NULL, DELIM"=");
+            runparams->itrlim = (ushort)atoi(next);
+            continue;
+        }
+        if(!strcmp("davmbsmul", next)){
             next = strtok(NULL, DELIM"=");
             runparams->mbsmul = (fp)atof(next);
+            continue;
+        }
+        if(!strcmp("lcgstab", next)){
+            next = strtok(NULL, DELIM"=");
+            runparams->stab = (uchar)atoi(next);
             continue;
         }
         if(!strcmp("meff", next)){
@@ -99,8 +111,13 @@ uchar readjob(job*restrict runparams){
             continue;
         }
         if(!strcmp("fstarget", next)){
-            next = strtok(NULL, DELIM"=");
-            runparams->fstarget = (fp)atof(next);
+            runparams->fstargets = malloc(N_TOKEN_MAX*sizeof(fp));
+            for(j = (uchar)0; (next = strtok(NULL, DELIM"=")); ++j){
+                runparams->fstargets[j] = (fp)atof(next);
+                runparams->nfstargets++;
+            }
+            runparams->fstargets = realloc(runparams->fstargets, 
+                                           runparams->nfstargets*sizeof(fp));
             continue;
         }
         ///accuracy control
@@ -246,13 +263,19 @@ uchar readpotential(const uchar nspecs, pot*restrict*restrict potentials){
     return (uchar)0;
 }
 
+//Gives the fractional coordinates of monkhorst-pack k-points along b_i
+//for an index i and number of subdivisions ni
+static forceinline fp mpfrac(const ushort i, const ushort ni){
+    return (fp)((ushort)2*i + (ushort)1 - ni) / (fp)((ushort)2*ni);
+}
 
 /*
 *  reads string literal 'INFILE_KPOINTS' and returns an array of kpts
 *  MEM: allocation of nkpts k-points
 *  RET: 0 on success, 1 on file not found error, 2 on unrecognized mode error
 */
-uchar readkpoints(ushort*restrict nkpoints, kpt*restrict*restrict kpoints){
+uchar readkpoints(const fp B[restrict 3][3],
+                  ushort*restrict nkpoints, kpt*restrict*restrict kpoints){
     //File format is as follows (a bit like a vasp.5 KPOINTS file):
     //line 0:   comment (no-op)
     //line 1:   a character, 'e', 'l', 'm', for 'explicit', 'line', 'mesh'
@@ -263,7 +286,7 @@ uchar readkpoints(ushort*restrict nkpoints, kpt*restrict*restrict kpoints){
     FILE* infile;
     char line[LINESIZE_MAX];
     char mode;
-    ushort i, j, i1, i2, i3;
+    ushort c, i, j, k, i1, i2, i3, subdivs[3];
     fp jp;
     fp d[3];
 
@@ -278,15 +301,15 @@ uchar readkpoints(ushort*restrict nkpoints, kpt*restrict*restrict kpoints){
     ///here the reading / working with kpoints changes depending on mode
     switch(mode){
         ///'explicit' mode: lines 3+ each have the k point coordinates in 
-        ///fractional units along b1, b2, b3
+        ///fractional units along b1, b2, b3, followed by the k-p weight
         case 'e':
             fscanf(infile, " %hu ", nkpoints);
             
             *kpoints = malloc((*nkpoints)*sizeof(kpt));
             for(i = (ushort)0; i < *nkpoints; ++i){
-                fscanf(infile, " "FPFORMAT" "FPFORMAT" "FPFORMAT" ",
+                fscanf(infile, " "FPFORMAT" "FPFORMAT" "FPFORMAT" "FPFORMAT" ",
                        &(*kpoints)[i].crds[0], &(*kpoints)[i].crds[1],
-                       &(*kpoints)[i].crds[2]);
+                       &(*kpoints)[i].crds[2], &(*kpoints)[i].wgt);
             }
             break;
 
@@ -322,19 +345,81 @@ uchar readkpoints(ushort*restrict nkpoints, kpt*restrict*restrict kpoints){
                     (*kpoints)[j].crds[2] = (*kpoints)[i3].crds[2] + jp*d[2];
                 }
             }
+            ///may as well set appropriate weights, though you'd be a moron for
+            ///trying to use a linemode mesh for integrals
+            jp = ONE / (fp)(*nkpoints);
+            for(i = (ushort)0; i < *nkpoints; ++i){
+                (*kpoints)[i].wgt = jp;
+            }
             break;
 
         ///'mesh' mode: line 3 is a triplet of integers that represent the 
-        ///number of subdivisions in the (h, k, l) directions for a 
-        ///gamma-centered mesh
-        //!TODO: actually implement this.  considering symmetry would be wise...
+        ///number of subdivisions in the (h, k, l) directions a la M.P.
+        ///this implementation uses 0-indexing and applies inversion symmetry
         case 'm':
             fscanf(infile, " %hu %hu %hu ", &i1, &i2, &i3);
+#if 1
+            *nkpoints = i1*i2*i3/(ushort)2;
+            if(i1%(ushort)2 != (ushort)0 && i2%(ushort)2 != (ushort)0 && 
+               i3%(ushort)2 != (ushort)0){
+                (*nkpoints)++; ///gamma point
+            }
+            *kpoints = malloc((*nkpoints)*sizeof(kpt));
+            subdivs[0] = i1; subdivs[1] = i2; subdivs[2] = i3;
+            mpgridfi(B, subdivs, *kpoints);
+#else
             *nkpoints = i1*i2*i3;
+
+            *kpoints = malloc(((*nkpoints)/(ushort)2+(ushort)1)*sizeof(kpt));
+            c = (ushort)0;
+            jp = (fp)2.0 / (fp)(*nkpoints);
+            ///first section: works for n1 = even
+            for(i = (ushort)0; i < i1/(ushort)2; ++i){
+            for(j = (ushort)0; j < i2; ++j){
+            for(k = (ushort)0; k < i3; ++k){
+                (*kpoints)[c].crds[0] = mpfrac(i, i1);
+                (*kpoints)[c].crds[1] = mpfrac(j, i2);
+                (*kpoints)[c].crds[2] = mpfrac(k, i3);
+                (*kpoints)[c].wgt = jp;
+                c++;
+            }
+            }
+            }
+            if(i1%(ushort)2 == (ushort)0) goto end;
+            ///second section: correction if n1 = odd, ok for n2 = even
+            for(j = (ushort)0; j < i2/(ushort)2; ++j){
+            for(k = (ushort)0; k < i3; ++k){
+                (*kpoints)[c].crds[0] = ZERO;
+                (*kpoints)[c].crds[1] = mpfrac(j, i2);
+                (*kpoints)[c].crds[2] = mpfrac(k, i3);
+                (*kpoints)[c].wgt = jp;
+                c++;
+            }
+            }
+            if(i2%(ushort)2 == (ushort)0) goto end;
+            ///third section: correction if n2 = odd, ok for n3 = even
+            for(k = (ushort)0; k < i3/(ushort)2; ++k){
+                (*kpoints)[c].crds[0] = ZERO;
+                (*kpoints)[c].crds[1] = ZERO;
+                (*kpoints)[c].crds[2] = mpfrac(k, i3);
+                (*kpoints)[c].wgt = jp;
+                c++;
+            }
+            if(i3%(ushort)2 == (ushort)0) goto end;
+            ///final section: include the gamma point if necessary
+            (*kpoints)[c].crds[0] = ZERO;
+            (*kpoints)[c].crds[1] = ZERO;
+            (*kpoints)[c].crds[2] = ZERO;
+            (*kpoints)[c].wgt = HALF*jp; ///gamma has no repeats
+            c++;
+
+            end:
+            *nkpoints = c;
             break;
 
         default:
             return (uchar)2;
+#endif
     }
 
     fclose(infile);
@@ -346,7 +431,7 @@ uchar readkpoints(ushort*restrict nkpoints, kpt*restrict*restrict kpoints){
 //Write out basic information (version, date, ...)
 //a smart person will redirct this to a file so that it can be mapped to results
 //later, but even if that does not happen, it looks professional
-void writeheader(){
+void writeheader(const uint seed){
     time_t t;
     struct tm tm;
 
@@ -364,6 +449,8 @@ void writeheader(){
     #elif(PREC == 2)
     puts("using DOUBLE point precision");
     #endif
+    //random seed
+    printf("rng seed: %u\n", seed);
 
     puts("");
 }
@@ -375,8 +462,8 @@ void reportjob(const job* runparams){
            runparams->runmode, runparams->diagmode, runparams->nthreads);
     printf(" nbands = %hu   mbsmul = "FPFORMAT"\n",
            runparams->nbands, runparams->mbsmul);
-    printf(" meff = "FPFORMAT" (m0)   fstarget = "FPFORMAT" (eV)\n",
-           runparams->meff, runparams->fstarget);    
+    printf(" meff = "FPFORMAT" (m0)   nfstargets = %hhu\n",
+           runparams->meff, runparams->nfstargets);    
     printf(" entol = "FPFORMAT" (eV)   encut = "FPFORMAT" (eV)   fftbsmul = "
            FPFORMAT"\n",
            runparams->entol, runparams->encut, runparams->fftgmul);
@@ -455,7 +542,8 @@ void reportkpoints(const ushort nkpoints, const kpt* kpoints){
 //---Output (to file)-----------------------------------------------------------
 #define FFMT "%+.7e"
 //Writes out the eigenvalues vs. k for a set of kpoints to 'OUTFILE_EIGENVALS'
-void writebands(const fp B[restrict 3][3], const ushort nbands, 
+void writebands(const uchar id,
+                const fp B[restrict 3][3], const ushort nbands, 
                 const ushort nkpts, const kpt*restrict kpts){
     //File format is as follows (a bit like a vasp.5 EIGENVAL file):
     //line 0:   b1x b1y b1z
@@ -468,9 +556,14 @@ void writebands(const fp B[restrict 3][3], const ushort nbands,
     //units they were sent in as (prob. fractional)
 
     FILE* outfile;
+    char outname[N_TOKEN_MAX];
     ushort i, j;
 
-    outfile = fopen(OUTFILE_EIGENVALS, "w");
+    for(i = (ushort)0; OUTFILE_EIGENVAL_BASE[i] != '\0'; ++i){
+        outname[i] = OUTFILE_EIGENVAL_BASE[i];
+    }
+    outname[i] = id;
+    outfile = fopen(outname, "w");
 
     //write the reciprocal space lattice
     fprintf(outfile, FFMT" "FFMT" "FFMT"\n", B[0][0], B[0][1], B[0][2]);

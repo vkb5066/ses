@@ -16,27 +16,40 @@
 #define INFILE_RUNPARAMS "runparams"
 #define INFILE_KPOINTS   "kpoints"
 
-#define OUTFILE_EIGENVALS "bands"
+#define OUTFILE_EIGENVAL_BASE "bands-\0 " ///DO NOT REMOVE null terminator!
 
 
 //---Function optimization / control--------------------------------------------
-#define SAFE_SIZE_ALLOC 0 ///overestimate memory needed for pws
+#define SAFE_SIZE_ALLOC 1 ///overestimate memory needed for pws
 #define SAFE_QR 0 ///stop overflow in qr eigensolver
 #define SAFE_EXPL_HAM 1 ///stop oob in V(G) for explicit H if fftgmul < 2.0
+#define SAFE_LCG 1 ///normalize curr (1) / curr+prev (2) |psi> in lopcg's ogs
 
 //eigensolver defaults
-#define QR_ITR_LIM 25u
-#define JD_ITR_LIM 40u
-#define DA_ITR_LIM 60u
+#define DEF_QR_ITRLIM 25u
+#define DEF_JD_ITRLIM 40u
+#define DEF_DA_ITRLIM 6000u
+#define DEF_CG_ITRLIM 300u
 #if(PREC == 1)
 #define DEF_QR_EPS 1.0000000e-6F
 #define DEF_JD_EPS 1.0000000e-4F
 #define DEF_DA_EPS 1.0000000e-3F
+#define DEF_CG_EPS 1.0000000e-3F
 #elif(PREC == 2)
 #define DEF_QR_EPS 1.0000000000000000e-12
 #define DEF_JD_EPS 1.0000000000000000e-08
 #define DEF_DA_EPS 1.0000000000000000e-06
+#define DEF_CG_EPS 1.0000000000000000e-06
 #endif
+///conditional normalization of residual vectors in OGS ... lo, hi bounds
+#if(PREC == 1)
+#define DEF_CG_CNLIMLO 1.0000000e-24F
+#define DEF_CG_CNLIMHI 1.0000000e+00F ///smaller = more stability
+#elif(PREC == 2)
+#define DEF_CG_CNLIMLO 1.0000000000000000e-36
+#define DEF_CG_CNLIMHI 1.0000000000000000e+00 ///smaller = more stability
+#endif
+
 
 //---Physics, math constants----------------------------------------------------
 ///units are eV, angstroms, etc. unless otherwise noted
@@ -142,13 +155,17 @@ struct pot{
 
 struct job{
     uchar runmode; ///elec struct, relaxation, both? ... etc
-    uchar diagmode; ///how to diagonalize H ... direct, dav, folded spectrum?
+    uchar diagmode; ///how to diagonalize H ... direct, dav, lobcg?
     ushort nthreads; ///number of threads that work on a job at once
     ushort nbands; ///how many eigpairs to keep.  lowest or closest to fstarget?
-    fp mbsmul; ///multiplies nbands for max basis size before reset in dav
     
+    ushort itrlim; ///number of unconverged eigensolver steps before aborting
+    fp mbsmul; ///multiplies nbands for max basis size before reset in dav
+    uchar stab; ///0, 1, 2 - stability/speed tradeoff for lopcg (higher=slower)    
+
     fp meff; ///the effective mass m* mentioned in the 'hamil' struct 
-    fp fstarget; ///reference energy for folded spectrum method
+    uchar nfstargets; ///number of reference energies for folded spectrum
+    fp*restrict fstargets; ///reference energy for folded spectrum method
 
     fp entol; ///diff between eigvals of two itrns before converg. achieved
     fp encut; ///pw energy cutoff (eV) -> to gcut^2 (2pi/angstrm)^2
@@ -166,7 +183,8 @@ struct hamil{
     uint npw; ///number of plane waves
     short*restrict mills; ///dim npw x 3, holds all (h, k, l) w/ |k+G| < Gcut
 
-    ///kinetic energy
+    ///kinetic energy, g vec magnitudes
+    fp*restrict la; ///inline w/ mills' dim 0: hbar^2/2m* * |G|^2 in basis
     fp*restrict ke; ///inline w/ mills' dim 0: hbar^2/2m* * |k+G|^2 in basis
 
     ///potential energy (local)
@@ -186,6 +204,7 @@ struct hamil{
 
 #define MIN(a,b) (((a)<(b)) ? (a):(b))
 #define MAX(a,b) (((a)>(b)) ? (a):(b))
+#define SWAP(T, a, b) do{T SWAP = a; a = b; b = SWAP;} while(0)
 
 
 //---Program-wide functions-----------------------------------------------------
@@ -206,6 +225,17 @@ uchar dav(const uint n, const hamil ham,
 		  fp*restrict e, cfp*restrict*restrict X,	
 		  //control params
 		  const uint fsm, const fp eref, const uint itrlim, const fp eps);
+uchar lcg(const uint neig, const uint n, const hamil ham,
+		  //workspace params:
+		  uchar*restrict IWS,
+		  fp*restrict RWS, cfp*restrict CWS, cfp*restrict*restrict CCWS,
+		  //initial guess params: V0 = initial guess for eigvec, dim v0rs x v0cs
+		  const uint v0rs, const uint v0cs, const cfp*restrict*restrict V0,
+		  //return params: e = neig x 1 = vals, X = neig x npw = vecs                                    
+		  fp*restrict e, cfp*restrict*restrict X,	  
+		  //control params
+		  const uchar fsm, const fp eref, const uint itrlim, const fp eps, 
+		  const uchar stab);
 
 //---fft.c: implementation of fft-like functions (a "real" fft isn't necessary)
 void fftconv3dif(const ushort lens[restrict 3], const uchar l2lens[restrict 3],
@@ -220,27 +250,34 @@ void setmaxdims(const fp gcut, const fp gcutvmul, const fp B[restrict 3][3],
                 uchar hkll2sv[restrict 3], uint*restrict sizet);
 void sethamkin(const fp gcut2, const ushort absmillmax[restrict 3],
                const fp B[restrict 3][3], const fp meff,
-               hamil*restrict ham); 
-void sethamvloc(const lat lattice, const pot*restrict pots,
-                hamil*restrict ham);
+               hamil*restrict ham);
+void sethamlap(const fp B[restrict 3][3], const fp meff, hamil*restrict ham); 
+void sethamvloc(const lat lattice, const fp B[restrict 3][3],
+                const pot*restrict pots, hamil*restrict ham);
 void buildexphamil(const hamil haminfo, cfp*restrict H);
 
 //---io.c: input / output
 uchar readjob(job*restrict runparams);
 uchar readlattice(lat*restrict lattice);
 uchar readpotential(const uchar nspecs, pot*restrict*restrict potentials);
-uchar readkpoints(ushort*restrict nkpoints, kpt*restrict*restrict kpoints);
+uchar readkpoints(const fp B[restrict 3][3],
+                  ushort*restrict nkpoints, kpt*restrict*restrict kpoints);
 void reportjob(const job* runparams);
 void reportlattice(const lat* lattice);
 void reportpotential(const uchar nspecs, const pot* potentials);
 void reportkpoints(const ushort nkpoints, const kpt* kpoints);
-void writeheader();
-void writebands(const fp B[restrict 3][3], const ushort nbands, 
+void writeheader(const uint seed);
+void writebands(const uchar id,
+                const fp B[restrict 3][3], const ushort nbands, 
                 const ushort nkpts, const kpt*restrict kpts);
 
 //---lattice.c: working on real/recip lattice
 void tocrdsc(lat* lattice);
 void torecipbasis(fp A[restrict 3][3]);
+
+//---monpac.c: k-point grids
+void mpgridfi(const fp B[restrict 3][3], const ushort sds[restrict 3],
+              kpt*restrict kpts);
 
 //---routines.c: different runmodes called from main
 void runstaticbs(job* runparams);

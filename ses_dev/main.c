@@ -1,10 +1,17 @@
+#include <stdlib.h>
 #include <stdio.h>
+#include <time.h>
 #include "def.h"
 
 int main(int argc, char** argv){
+    uint seed;
     job runparams; uchar err;
  
-    writeheader();
+    //we'll need a random seed - get it and print it if not supplied by cla
+    seed = (argc == 2)? (uint)atoi(argv[1]) : time(NULL);
+    srand(seed);
+
+    writeheader(seed);
 
     //Read main input file, figure out what to do
     if((err = readjob(&runparams))) goto quitjob;
