@@ -176,6 +176,7 @@ void sethamkin(const fp gcut2, const ushort absmillmax[restrict 3],
 * sets the array of hbar^2/2m * |G|^2 (la, size npw) in the hamiltonian
 * MIND: 'mills' must be set before this function is called!
 */
+#if USE_BAD_PRECONDITIONER
 void sethamlap(const fp B[restrict 3][3], const fp meff, hamil*restrict ham){
     uint i, j;
     fp hf, kf, lf;
@@ -196,6 +197,7 @@ void sethamlap(const fp B[restrict 3][3], const fp meff, hamil*restrict ham){
         ham->la[i] = tmul*(gvec[0]*gvec[0]+gvec[1]*gvec[1]+gvec[2]*gvec[2]);
     }
 }
+#endif
 
 /*
 *  Sets the local potential V(G) on the reciprocal space grid

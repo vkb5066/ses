@@ -37,9 +37,6 @@ static forceinline void initjobdefs(const uchar nelems,
             case (uchar)1: ///jd
                 runparams->entol = DEF_JD_EPS;
                 break;
-            case (uchar)2: ///dav
-                runparams->entol = DEF_DA_EPS;
-                break;
             default: ///??? just set to the smallest value we have
                 runparams->entol = DEF_QR_EPS;
         }

@@ -37,14 +37,17 @@ uchar readjob(job*restrict runparams){
     runparams->nthreads = (ushort)1; ///okay default 
     runparams->nbands = (ushort)0; ///needs updated if no estimate is read in
     runparams->itrlim = (ushort)0; ///needs updated if no value read in
-    runparams->mbsmul = (fp)2.0; ///TODO: do some tests to estimate a good default for this one ... between 2 and 6?
     runparams->stab = (uchar)1; ///okay default
     runparams->meff = ONE; ///okay default 
     runparams->nfstargets = (uchar)0; ///okay default
     runparams->entol = -ONE; ///needs updated if no value is read in 
     runparams->encut = -ONE; ///needs updated if no value is read in
     runparams->fftgmul = ONE; ///okay default 
-
+    runparams->timestep = ONE; ///okay default
+    runparams->mditrlim = DEF_MD_ITRLIM; ///okay default
+    runparams->rcut = (fp)3.75; ///okay default
+    runparams->acut = (fp)120.0; ///okay default
+    runparams->ftol = DEF_MD_FTOL; ///okay default
 
     //reading file starts here
     while((c = getc(infile)) != EOF){
@@ -95,11 +98,6 @@ uchar readjob(job*restrict runparams){
             runparams->itrlim = (ushort)atoi(next);
             continue;
         }
-        if(!strcmp("davmbsmul", next)){
-            next = strtok(NULL, DELIM"=");
-            runparams->mbsmul = (fp)atof(next);
-            continue;
-        }
         if(!strcmp("lcgstab", next)){
             next = strtok(NULL, DELIM"=");
             runparams->stab = (uchar)atoi(next);
@@ -114,7 +112,7 @@ uchar readjob(job*restrict runparams){
             runparams->fstargets = malloc(N_TOKEN_MAX*sizeof(fp));
             for(j = (uchar)0; (next = strtok(NULL, DELIM"=")); ++j){
                 runparams->fstargets[j] = (fp)atof(next);
-                runparams->nfstargets++;
+                (runparams->nfstargets)++;
             }
             runparams->fstargets = realloc(runparams->fstargets, 
                                            runparams->nfstargets*sizeof(fp));
@@ -134,6 +132,32 @@ uchar readjob(job*restrict runparams){
         if(!strcmp("fftbsmul", next)){
             next = strtok(NULL, DELIM"=");
             runparams->fftgmul = (fp)atof(next);
+            continue;
+        }
+        ///md control
+        if(!strcmp("timestep", next)){
+            next = strtok(NULL, DELIM"=");
+            runparams->timestep = (fp)atof(next);
+            continue;
+        }
+        if(!strcmp("milim", next)){
+            next = strtok(NULL, DELIM"=");
+            runparams->mditrlim = (ushort)atoi(next);
+            continue;
+        }
+        if(!strcmp("rcut", next)){
+            next = strtok(NULL, DELIM"=");
+            runparams->rcut = (fp)atof(next);
+            continue;
+        }
+        if(!strcmp("acut", next)){
+            next = strtok(NULL, DELIM"=");
+            runparams->acut = (fp)atof(next);
+            continue;
+        }
+        if(!strcmp("ftol", next)){
+            next = strtok(NULL, DELIM"=");
+            runparams->ftol = (fp)atof(next);
             continue;
         }
         ///read and write
@@ -182,8 +206,8 @@ uchar readlattice(lat*restrict lattice){
     
     ///lattice input
     for(i = 0u; i < 3u; ++i){
-            fscanf(infile, " "FPFORMAT" "FPFORMAT" "FPFORMAT" ", 
-                   &lattice->A[i][0], &lattice->A[i][1], &lattice->A[i][2]);
+        fscanf(infile, " "FPFORMAT" "FPFORMAT" "FPFORMAT" ", 
+               &lattice->A[i][0], &lattice->A[i][1], &lattice->A[i][2]);
     }
 
     ///element types (skip for now, just need the count of them)   
@@ -226,7 +250,7 @@ uchar readlattice(lat*restrict lattice){
 uchar readpotential(const uchar nspecs, pot*restrict*restrict potentials){
      //File format is as follows:
     //line 0:   comment (no-op)
-    //line 1:   number of val electrons
+    //line 1:   number of val electrons, mass in amu
     //line 1:   q^2 sample start, q^2 sample stop, num of q^2 steps
     //line 2:   q^2 samples
     //line 3+:  restart from 0 for each 1 <= i <= nspecs
@@ -243,8 +267,9 @@ uchar readpotential(const uchar nspecs, pot*restrict*restrict potentials){
     for(i = (uchar)0; i < nspecs; ++i){
         fgets(line, LINESIZE_MAX, infile); ///skip comment line
         
-        ///num val elecs
-        fscanf(infile, " %hhu ", &(*potentials)[i].nvel);
+        ///num val elecs, atomic mass
+        fscanf(infile, " %hhu "FPFORMAT" ", 
+               &(*potentials)[i].nvel, &(*potentials)[i].mass);
 
         ///start, stop, step of pot sample array
         fscanf(infile, " "FPFORMAT" "FPFORMAT" %hu ",
@@ -263,11 +288,6 @@ uchar readpotential(const uchar nspecs, pot*restrict*restrict potentials){
     return (uchar)0;
 }
 
-//Gives the fractional coordinates of monkhorst-pack k-points along b_i
-//for an index i and number of subdivisions ni
-static forceinline fp mpfrac(const ushort i, const ushort ni){
-    return (fp)((ushort)2*i + (ushort)1 - ni) / (fp)((ushort)2*ni);
-}
 
 /*
 *  reads string literal 'INFILE_KPOINTS' and returns an array of kpts
@@ -286,7 +306,7 @@ uchar readkpoints(const fp B[restrict 3][3],
     FILE* infile;
     char line[LINESIZE_MAX];
     char mode;
-    ushort c, i, j, k, i1, i2, i3, subdivs[3];
+    ushort i, j, i1, i2, i3, subdivs[3];
     fp jp;
     fp d[3];
 
@@ -358,7 +378,6 @@ uchar readkpoints(const fp B[restrict 3][3],
         ///this implementation uses 0-indexing and applies inversion symmetry
         case 'm':
             fscanf(infile, " %hu %hu %hu ", &i1, &i2, &i3);
-#if 1
             *nkpoints = i1*i2*i3/(ushort)2;
             if(i1%(ushort)2 != (ushort)0 && i2%(ushort)2 != (ushort)0 && 
                i3%(ushort)2 != (ushort)0){
@@ -367,65 +386,79 @@ uchar readkpoints(const fp B[restrict 3][3],
             *kpoints = malloc((*nkpoints)*sizeof(kpt));
             subdivs[0] = i1; subdivs[1] = i2; subdivs[2] = i3;
             mpgridfi(B, subdivs, *kpoints);
-#else
-            *nkpoints = i1*i2*i3;
-
-            *kpoints = malloc(((*nkpoints)/(ushort)2+(ushort)1)*sizeof(kpt));
-            c = (ushort)0;
-            jp = (fp)2.0 / (fp)(*nkpoints);
-            ///first section: works for n1 = even
-            for(i = (ushort)0; i < i1/(ushort)2; ++i){
-            for(j = (ushort)0; j < i2; ++j){
-            for(k = (ushort)0; k < i3; ++k){
-                (*kpoints)[c].crds[0] = mpfrac(i, i1);
-                (*kpoints)[c].crds[1] = mpfrac(j, i2);
-                (*kpoints)[c].crds[2] = mpfrac(k, i3);
-                (*kpoints)[c].wgt = jp;
-                c++;
-            }
-            }
-            }
-            if(i1%(ushort)2 == (ushort)0) goto end;
-            ///second section: correction if n1 = odd, ok for n2 = even
-            for(j = (ushort)0; j < i2/(ushort)2; ++j){
-            for(k = (ushort)0; k < i3; ++k){
-                (*kpoints)[c].crds[0] = ZERO;
-                (*kpoints)[c].crds[1] = mpfrac(j, i2);
-                (*kpoints)[c].crds[2] = mpfrac(k, i3);
-                (*kpoints)[c].wgt = jp;
-                c++;
-            }
-            }
-            if(i2%(ushort)2 == (ushort)0) goto end;
-            ///third section: correction if n2 = odd, ok for n3 = even
-            for(k = (ushort)0; k < i3/(ushort)2; ++k){
-                (*kpoints)[c].crds[0] = ZERO;
-                (*kpoints)[c].crds[1] = ZERO;
-                (*kpoints)[c].crds[2] = mpfrac(k, i3);
-                (*kpoints)[c].wgt = jp;
-                c++;
-            }
-            if(i3%(ushort)2 == (ushort)0) goto end;
-            ///final section: include the gamma point if necessary
-            (*kpoints)[c].crds[0] = ZERO;
-            (*kpoints)[c].crds[1] = ZERO;
-            (*kpoints)[c].crds[2] = ZERO;
-            (*kpoints)[c].wgt = HALF*jp; ///gamma has no repeats
-            c++;
-
-            end:
-            *nkpoints = c;
             break;
 
         default:
             return (uchar)2;
-#endif
     }
 
     fclose(infile);
     return (uchar)0;
 }
 
+
+/*
+*  reads string literal 'INFILE_KEATING' and returns an array of keating params
+*  WRN: maximum number of species allowed is floor(sqrt(uchar_max))
+*  MEM: allocation of nspecs keating objects
+*  RET: 0 on success, 1 on file not found error
+*/
+uchar readkeating(const uchar nspecs, keat*restrict*restrict keatings){
+     //File format is as follows:
+    //line 0:   comment (no-op)
+    //line 1:   r_0(0, 0), r_0(0, 1), ..., r_0(0, nspecs-1)
+    //line 2:   alpha(0, 0), alpha(0, 1), ..., alpha(0, nspecs-1)
+    //line 3:   theta_0(0, 0, 0), theta_0(0, 0, 1), ..., theta_0(0, 0, nspecs-1)
+    //          theta_0(0, 1, 0), theta_0(0, 1, 1), ..., theta_0(0, 1, nspecs-1)
+    //          ...
+    //          theta_0(0, nspecs-1, 0), ... theta_0(0, nspecs-1, nspecs-1)
+    //line 4:   beta(0, 0), beta(0, 1), ..., beta(0, nspecs-1)
+    //line 5+:  restart at line 0, increment first index by 1
+    //units: angstroms, eV/angstroms^2, and degrees
+
+    FILE* infile;
+    char line[LINESIZE_MAX];
+    uchar i, j, nspecs2;
+
+    if(!(infile = fopen(INFILE_KEATING, "r"))) return (uchar)1;
+
+    nspecs2 = nspecs*nspecs;
+    *keatings = malloc(nspecs*sizeof(keat));
+    //reading file starts here: one block of four lines for each species
+    for(i = (uchar)0; i < nspecs; ++i){
+        fgets(line, LINESIZE_MAX, infile); ///skip comment line
+
+        //ideal interatomic spacing (dist in angstrm to inverse dist)
+        (*keatings)[i].r0inv = malloc(nspecs*sizeof(fp));
+        for(j = (uchar)0; j < nspecs; ++j){
+            fscanf(infile, " "FPFORMAT" ", &(*keatings)[i].r0inv[j]);
+            (*keatings)[i].r0inv[j] = ONE / (*keatings)[i].r0inv[j];
+        }
+
+        //alpha params
+        (*keatings)[i].al = malloc(nspecs*sizeof(fp));
+        for(j = (uchar)0; j < nspecs; ++j){
+            fscanf(infile, " "FPFORMAT" ", &(*keatings)[i].al[j]);
+        }
+
+        //ideal interatomic angles (angle in deg to cos(angle in rad)
+        (*keatings)[i].c0 = malloc(nspecs2*sizeof(fp));
+        for(j = (uchar)0; j < nspecs2; ++j){
+            fscanf(infile, " "FPFORMAT" ", &(*keatings)[i].c0[j]);
+            (*keatings)[i].c0[j] = COS(DEG2RAD((*keatings)[i].c0[j]));
+        }
+
+        //beta params (val in eV/A^2 to its square root)
+        (*keatings)[i].sqrtbe = malloc(nspecs*sizeof(fp));
+        for(j = (uchar)0; j < nspecs; ++j){
+            fscanf(infile, " "FPFORMAT" ", &(*keatings)[i].sqrtbe[j]);
+            (*keatings)[i].sqrtbe[j] = SQRT((*keatings)[i].sqrtbe[j]);
+        }
+    }
+
+    fclose(infile);
+    return (uchar)0;
+}
 
 //---Output (to stdout)---------------------------------------------------------
 //Write out basic information (version, date, ...)
@@ -436,7 +469,7 @@ void writeheader(const uint seed){
     struct tm tm;
 
     //version
-    puts("ses v0.1");
+    puts("ses v0.2");
     //date, time
     t = time(NULL);
     tm = *localtime(&t);
@@ -453,88 +486,6 @@ void writeheader(const uint seed){
     printf("rng seed: %u\n", seed);
 
     puts("");
-}
-
-//Write out the code's intrp. of the run params file, useful for sanity checks
-void reportjob(const job* runparams){
-    printf("here is my interpretation of file '" INFILE_RUNPARAMS "':\n");
-    printf(" mrun = %hhu   mdiag = %hhu   nthreads = %hu\n",
-           runparams->runmode, runparams->diagmode, runparams->nthreads);
-    printf(" nbands = %hu   mbsmul = "FPFORMAT"\n",
-           runparams->nbands, runparams->mbsmul);
-    printf(" meff = "FPFORMAT" (m0)   nfstargets = %hhu\n",
-           runparams->meff, runparams->nfstargets);    
-    printf(" entol = "FPFORMAT" (eV)   encut = "FPFORMAT" (eV)   fftbsmul = "
-           FPFORMAT"\n",
-           runparams->entol, runparams->encut, runparams->fftgmul);
-//    printf(" rpsi = %hhu   wpsi = %hhu\n",
-//           runparams->readpsi, runparams->writepsi);
-}
-
-//Write out the code's intrp. of the lattice file, useful for sanity checks
-void reportlattice(const lat* lattice){
-    uchar i;
-    ushort acc;
-
-    printf("here is my interpretation of file '" INFILE_LATTICE "':\n");
-    //A
-    printf(" a1 = ("FPFORMAT", "FPFORMAT", "FPFORMAT") angst.\n",
-           lattice->A[0][0], lattice->A[0][1], lattice->A[0][2]);
-    printf(" a2 = ("FPFORMAT", "FPFORMAT", "FPFORMAT") angst.\n",
-           lattice->A[1][0], lattice->A[1][1], lattice->A[1][2]);
-    printf(" a3 = ("FPFORMAT", "FPFORMAT", "FPFORMAT") angst.\n",
-           lattice->A[2][0], lattice->A[2][1], lattice->A[2][2]);
-    //num species + their counts
-    printf(" %hhu unique species; ", lattice->nspecs);
-    acc = (ushort)0;
-    for(i = (uchar)0; i < lattice->nspecs; ++i){
-        printf("%hu counts of type %hhu, ", lattice->speccounts[i], i);
-        acc += lattice->speccounts[i];
-    }
-    printf("\b\b; %hu total\n", acc);
-    //show first and last atom to ensure that memory is okay
-    printf(" position of atom 0: ("FPFORMAT", "FPFORMAT", "FPFORMAT")\n",
-           lattice->sites[0].crdsf[0], lattice->sites[0].crdsf[1], 
-           lattice->sites[0].crdsf[2]);
-    acc--;
-    printf(" position of atom %hu: ("FPFORMAT", "FPFORMAT", "FPFORMAT")\n",
-           acc, lattice->sites[acc].crdsf[0], lattice->sites[acc].crdsf[1], 
-           lattice->sites[acc].crdsf[2]);
-}
-
-//Write out the code's intrp. of the potential file, useful for sanity checks
-void reportpotential(const uchar nspecs, const pot* potentials){
-    uchar i;
-
-    printf("here is my interpretation of file '" INFILE_POTENTIAL "':\n");
-    printf(" read in %hhu potentials\n", nspecs);
-    for(i = (uchar)0; i < nspecs; ++i){
-        //sample info
-        printf(" elem %hhu has %hhu val electrons and is sampled from "
-               FPFORMAT" G^2 to "FPFORMAT" G^2 (%hu samples)\n",
-               i, potentials[i].nvel, 
-               potentials[i].q2lo, potentials[i].q2hi, potentials[i].nsamples);
-        //check the first and last element of v
-        printf(" v%hhu(min sampled G^2) = "FPFORMAT" eV, v%hhu(max sampled G^2)"
-               " = "FPFORMAT" eV\n", 
-               i, potentials[i].samples[0], i, 
-               potentials[i].samples[potentials[i].nsamples-(ushort)1]);
-    }
-}
-
-//Write out the code's intrp. of the kpoints file, useful for sanity checks
-void reportkpoints(const ushort nkpoints, const kpt* kpoints){
-    ushort nkpm1;
-
-    printf("here is my interpretation of file '" INFILE_KPOINTS "':\n");
-    printf(" read in %hu kpoints\n", nkpoints);
-    //check the first and last coords
-    printf(" kpt 0 has coords ("FPFORMAT", "FPFORMAT", "FPFORMAT")\n",
-           kpoints[0].crds[0], kpoints[0].crds[1], kpoints[0].crds[2]);
-    nkpm1 = nkpoints - (ushort)1;
-    printf(" kpt %hu has coords ("FPFORMAT", "FPFORMAT", "FPFORMAT")\n",
-           nkpm1, kpoints[nkpm1].crds[0], kpoints[nkpm1].crds[1], 
-           kpoints[nkpm1].crds[2]);
 }
 
 
@@ -584,9 +535,48 @@ void writebands(const uchar id,
 
     fclose(outfile);
 }
+#undef FFMT
 
+//writes lattice object to file OUTFILE_LATTICE
+//if specmap is not NULL, will replace the atom species line by specmap
+void writelattice(const lat lattice, const char*restrict specmap){
+    //file format is exactly the same as the infile format except the atomic 
+    //species (written as a, b, c, ... instead of species)
 
+    FILE* outfile;
+    uchar i; ushort j, acc;
 
+    outfile = fopen(OUTFILE_LATTICE, "w");
+
+    //comment
+    fprintf(outfile, "written by writelattice()\n");
+    
+    //basis
+    fprintf(outfile, FPFORMAT" "FPFORMAT" "FPFORMAT"\n", 
+            lattice.A[0][0], lattice.A[0][1], lattice.A[0][2]); 
+    fprintf(outfile, FPFORMAT" "FPFORMAT" "FPFORMAT"\n", 
+            lattice.A[1][0], lattice.A[1][1], lattice.A[1][2]); 
+    fprintf(outfile, FPFORMAT" "FPFORMAT" "FPFORMAT"\n", 
+            lattice.A[2][0], lattice.A[2][1], lattice.A[2][2]); 
+
+    //atom species, counts
+    if(specmap) fprintf(outfile, "%s", specmap);
+    else for(i = (uchar)0; i < lattice.nspecs; ++i) 
+             fprintf(outfile, "%c ", 'a' + i); 
+    fprintf(outfile, "\n");
+    for(i = (uchar)0; i < lattice.nspecs; ++i){
+        fprintf(outfile, "%hu ", lattice.speccounts[i]);
+    } fprintf(outfile, "\n");
+
+    //atoms
+    for(i = (uchar)0, acc = 0u, acc = 0u; i < lattice.nspecs; ++i){
+    for(j = (ushort)0; j < lattice.speccounts[i]; ++j, ++acc){
+        fprintf(outfile, FPFORMAT" "FPFORMAT" "FPFORMAT"\n", 
+                lattice.sites[acc].crdsf[0], lattice.sites[acc].crdsf[1], 
+                lattice.sites[acc].crdsf[2]); 
+    }
+    }
+}
 
 
 

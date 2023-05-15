@@ -6,7 +6,7 @@
 int main(int argc, char** argv){
     uint seed;
     job runparams; uchar err;
- 
+
     //we'll need a random seed - get it and print it if not supplied by cla
     seed = (argc == 2)? (uint)atoi(argv[1]) : time(NULL);
     srand(seed);
@@ -25,7 +25,10 @@ int main(int argc, char** argv){
         case (uchar)1:
             runstaticbs(&runparams);
             break;
-
+        ///atomic relaxation (no band structure, output final positions to file)
+        case (uchar)2:
+            runmd(&runparams);
+            break;
 
         //---Testing modes------------------------------------------------------
 #if(COMPILE_TEST_ROUTINES)
@@ -43,6 +46,12 @@ int main(int argc, char** argv){
             break;
 #endif
         //---Other--------------------------------------------------------------
+#if(COMPILE_PSO_FILE)
+        ///pso fitting
+        case (uchar)100:
+            psomin(&runparams);
+            break;
+#endif
         ///Unknown code error
         default:
             goto quitbadmode;
@@ -50,7 +59,7 @@ int main(int argc, char** argv){
 
 
     
-
+    puts("");
     return 0;
 
     quitjob: 

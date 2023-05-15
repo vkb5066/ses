@@ -5,7 +5,8 @@
 #include <math.h>
 
 
-#define COMPILE_TEST_ROUTINES 1
+#define COMPILE_TEST_ROUTINES 0
+#define COMPILE_PSO_FILE 1
 #define PARALLEL 0 ///TODO: figure out pthreads so that this is useful
 
 //---Program control------------------------------------------------------------
@@ -15,20 +16,24 @@
 #define INFILE_POTENTIAL "potential"
 #define INFILE_RUNPARAMS "runparams"
 #define INFILE_KPOINTS   "kpoints"
+#define INFILE_KEATING   "keating"
 
-#define OUTFILE_EIGENVAL_BASE "bands-\0 " ///DO NOT REMOVE null terminator!
+#define OUTFILE_EIGENVAL_BASE "bands-\0\0" ///DO NOT REMOVE null terminator!
+#define OUTFILE_LATTICE  "flattice"
 
 
 //---Function optimization / control--------------------------------------------
-#define SAFE_SIZE_ALLOC 1 ///overestimate memory needed for pws
-#define SAFE_QR 0 ///stop overflow in qr eigensolver
-#define SAFE_EXPL_HAM 1 ///stop oob in V(G) for explicit H if fftgmul < 2.0
+#define USE_BAD_PRECONDITIONER 0 ///use Zunger's fsm precndtnr for testing
+
+#define SAFE_SIZE_ALLOC 1 ///1 = overestimate memory needed for pws
+#define SAFE_NBR_ALLOC 1 ///1 = don't attempt to shrink extra periodic image mem
+#define SAFE_QR 0 ///1 = stop overflow in qr eigensolver
+#define SAFE_EXPL_HAM 1 ///1 = stop oob in V(G) for explicit H if fftgmul < 2.0
 #define SAFE_LCG 1 ///normalize curr (1) / curr+prev (2) |psi> in lopcg's ogs
 
 //eigensolver defaults
 #define DEF_QR_ITRLIM 25u
 #define DEF_JD_ITRLIM 40u
-#define DEF_DA_ITRLIM 6000u
 #define DEF_CG_ITRLIM 300u
 #if(PREC == 1)
 #define DEF_QR_EPS 1.0000000e-6F
@@ -38,7 +43,6 @@
 #elif(PREC == 2)
 #define DEF_QR_EPS 1.0000000000000000e-12
 #define DEF_JD_EPS 1.0000000000000000e-08
-#define DEF_DA_EPS 1.0000000000000000e-06
 #define DEF_CG_EPS 1.0000000000000000e-06
 #endif
 ///conditional normalization of residual vectors in OGS ... lo, hi bounds
@@ -50,23 +54,39 @@
 #define DEF_CG_CNLIMHI 1.0000000000000000e+00 ///smaller = more stability
 #endif
 
+//md defaults
+#define DEF_MD_ITRLIM 100u
+#define MD_QUENCH_STYLE 1 ///0 = no quench, 1 = vasp style, 2 = Mattoni style
+#if(PREC == 1)
+#define DEF_MD_EPS              1.0000000e-3F
+#define DEF_MD_FTOL             1.0000000e-2F
+#define DEF_MD_VASP_QUENCH_EPS  1.0000000e-2F
+#elif(PREC == 2)
+#define DEF_MD_EPS              1.0000000000000000e-6
+#define DEF_MD_FTOL             1.0000000000000000e-2
+#define DEF_MD_VASP_QUENCH_EPS  1.0000000000000000e-2
+#endif
 
 //---Physics, math constants----------------------------------------------------
-///units are eV, angstroms, etc. unless otherwise noted
+///units are eV, angstroms, amu, fs, etc. unless otherwise noted
 #if(PREC == 1)
+#define SMALL             1.0000000e-6F
 #define ZERO              0.0000000F
 #define HALF              0.5000000F
 #define ONE               1.0000000F
 #define PI                3.1415927F
 #define TWOPI             6.2831853F
 #define HBARSQD_OVER_TWOM 3.8099821F
+#define VERLET_ACC_CONV   4.8242666e-3F ///1/2 (eV/A/dal*fs^2)^-1 -> A 
 #elif(PREC == 2)
+#define SMALL             1.0000000000000000e-15
 #define ZERO              0.0000000000000000
 #define HALF              0.5000000000000000
 #define ONE               1.0000000000000000
 #define PI                3.1415926535897932
 #define TWOPI             6.2831853071795865
 #define HBARSQD_OVER_TWOM 3.8099821161431488
+#define VERLET_ACC_CONV   4.8242666078326639e-3 ///1/2 (eV/A/dal*fs^2)^-1 -> A
 #endif
 
 //---Typedefs-------------------------------------------------------------------
@@ -87,6 +107,7 @@ typedef struct site site;
 typedef struct lat lat;
 typedef struct pot pot;
 typedef struct job job;
+typedef struct keat keat;
 typedef struct hamil hamil;
 
 //---Structures-----------------------------------------------------------------
@@ -123,8 +144,8 @@ struct site{
     ushort nimgs;
     site**restrict imgs;
 
-    ///may be useful later?  points to parent atom
-    //site* self;
+    ///points to parent atom
+    site* self;
 };
 
 ///data describing real-space the lattice
@@ -142,6 +163,7 @@ struct lat{
 ///for now, has elemental local potentials as a function of q^2 = |G_i - G_j|^2
 struct pot{
     uchar nvel; ///number of explicit electrons for this potential
+    fp mass; ///in daltons
     //fp encut; ///not total cutoff, just cutoff that this potential was fit to
 
     ///stuff needed for linear interpolation between the known data points 
@@ -155,12 +177,11 @@ struct pot{
 
 struct job{
     uchar runmode; ///elec struct, relaxation, both? ... etc
-    uchar diagmode; ///how to diagonalize H ... direct, dav, lobcg?
+    uchar diagmode; ///how to diagonalize H ... direct, lobcg?
     ushort nthreads; ///number of threads that work on a job at once
     ushort nbands; ///how many eigpairs to keep.  lowest or closest to fstarget?
     
     ushort itrlim; ///number of unconverged eigensolver steps before aborting
-    fp mbsmul; ///multiplies nbands for max basis size before reset in dav
     uchar stab; ///0, 1, 2 - stability/speed tradeoff for lopcg (higher=slower)    
 
     fp meff; ///the effective mass m* mentioned in the 'hamil' struct 
@@ -171,8 +192,25 @@ struct job{
     fp encut; ///pw energy cutoff (eV) -> to gcut^2 (2pi/angstrm)^2
     fp fftgmul; ///multiplies cutoff for width of fft mesh (between 1.0 and 2.0)
 
+    fp timestep; ///vel. verlet time step in fs
+    ushort mditrlim; ///number of unconverged md steps before aborting
+    fp rcut; ///cutoff radius for pairs, triplets (angstrm)
+    fp acut; ///cutoff angle for triplets (degrees)
+    fp ftol; ///magnitude of maximum force on an atom before converg. achieved
+
     //uchar readpsi;
     //uchar writepsi;
+};
+
+//params needed for keating potential dynamics
+struct keat{
+    //two-body terms
+    fp*restrict r0inv; ///inverse of ideal bond distd ij, 1/agstrms.  len nspecs
+    fp*restrict al; ///alpha param, eV/angstrm^2.  len nspecs
+
+    ///three-body terms
+    fp*restrict c0; ///cos(ideal angle jik).  len nspecs^2
+    fp*restrict sqrtbe; ///sqrt(beta param), sqrt(eV/angstrm^2).  len nspecs
 };
 
 ///data needed for the hamiltonian
@@ -184,7 +222,9 @@ struct hamil{
     short*restrict mills; ///dim npw x 3, holds all (h, k, l) w/ |k+G| < Gcut
 
     ///kinetic energy, g vec magnitudes
+#if USE_BAD_PRECONDITIONER
     fp*restrict la; ///inline w/ mills' dim 0: hbar^2/2m* * |G|^2 in basis
+#endif
     fp*restrict ke; ///inline w/ mills' dim 0: hbar^2/2m* * |k+G|^2 in basis
 
     ///potential energy (local)
@@ -206,25 +246,10 @@ struct hamil{
 #define MAX(a,b) (((a)>(b)) ? (a):(b))
 #define SWAP(T, a, b) do{T SWAP = a; a = b; b = SWAP;} while(0)
 
-
 //---Program-wide functions-----------------------------------------------------
 //---eigen.c: implementation of eigensolvers (qr, jacobi, dav, ...)
 uchar qrh(const uint n, cfp*restrict A, fp*restrict e, cfp*restrict*restrict V,
 		  const uint itrlim, const fp eps, const uchar vecs);
-uchar dav(const uint n, const hamil ham,  	 
-		  //buffer params: V, Q, W = mbs x npw, psig* = fftdim[0]*[1]*[2]
-		  //               L = pointer-to-pointer mbs x npw
-		  const uint mbs, 
-		  cfp*restrict V, cfp*restrict Q, cfp*restrict W, 
-		  cfp*restrict*restrict L,
-		  cfp*restrict psig1, cfp*restrict psig2,
-		  //initial guess params: V0 = initial guess for eigvec, dim v0rs x v0cs
-		  const uint v0rs, const uint v0cs, const cfp*restrict*restrict V0,
-		  //return params: e = rbs x 1 = vals, X = rbs x npw = vecs
-		  const uint rbs, ///(rbs is usually neigs)                                          
-		  fp*restrict e, cfp*restrict*restrict X,	
-		  //control params
-		  const uint fsm, const fp eref, const uint itrlim, const fp eps);
 uchar lcg(const uint neig, const uint n, const hamil ham,
 		  //workspace params:
 		  uchar*restrict IWS,
@@ -262,25 +287,39 @@ uchar readlattice(lat*restrict lattice);
 uchar readpotential(const uchar nspecs, pot*restrict*restrict potentials);
 uchar readkpoints(const fp B[restrict 3][3],
                   ushort*restrict nkpoints, kpt*restrict*restrict kpoints);
-void reportjob(const job* runparams);
-void reportlattice(const lat* lattice);
-void reportpotential(const uchar nspecs, const pot* potentials);
-void reportkpoints(const ushort nkpoints, const kpt* kpoints);
+uchar readkeating(const uchar nspecs, keat*restrict*restrict keatings);
 void writeheader(const uint seed);
 void writebands(const uchar id,
                 const fp B[restrict 3][3], const ushort nbands, 
                 const ushort nkpts, const kpt*restrict kpts);
+void writelattice(const lat lattice, const char*restrict specmap);
 
 //---lattice.c: working on real/recip lattice
-void tocrdsc(lat* lattice);
+void tocrdsc(const lat lattice);
+void tocrdsf(const fp B[restrict 3][3], const lat lattice);
+void backtocell(const lat lattice, const uchar imgs);
 void torecipbasis(fp A[restrict 3][3]);
+void toinverse(fp A[restrict 3][3]);
+
+//---md.c: molecular dynamics
+void setnbrs(const lat lattice, 
+             ushort*restrict nxatoms, site*restrict*restrict xatoms,
+             const fp rcut, const fp acut, const fp eps);
+uchar relax(fp*restrict RWS, const lat lattice, const pot*restrict pots,
+            const keat*restrict keatings, const fp ts,
+            const fp maxforcetol, const uint itrlim);
 
 //---monpac.c: k-point grids
 void mpgridfi(const fp B[restrict 3][3], const ushort sds[restrict 3],
               kpt*restrict kpts);
 
-//---routines.c: different runmodes called from main
+//---pso.c: particle swarm optimization of keating params
+void psomin(job* runparams);
+
+//---(test)routines.c: different runmodes called from main
 void runstaticbs(job* runparams);
+void runmd(job* runparams);
+
 void testio(job runparams);
 void testqrh();
 void testexphamilgen(job runparams);
@@ -297,6 +336,8 @@ void testexphamilgen(job runparams);
 #define ACOS(x) acosf(x)
 #define SIN(x) sinf(x)
 #define ASIN(x) asinf(x)
+#define DEG2RAD(x) (x*1.7453293e-2F)
+#define RAD2DEG(x) (x*5.7295780e+1F)
 #elif(PREC == 2)
 //---io
 #define FPFORMAT "%lf" 
@@ -307,6 +348,9 @@ void testexphamilgen(job runparams);
 #define ACOS(x) acos(x)
 #define SIN(x) sin(x)
 #define ASIN(x) asin(x)
+#define DEG2RAD(x) (x*1.7453292519943296e-2)
+#define RAD2DEG(x) (x*5.7295779513082321e+1)
 #endif
 
 #endif
+//16, 7

@@ -440,53 +440,7 @@ static forceinline void _action(const ushort dims[restrict 3], /// = d
 }
 
 
-//modified grahm schmidt on V of size nvec x dimvec.  Q is V's buffer
-//TODO: can we get rid of all of these damn calls to ACC2?? seems like we're only going over vectors, so this shouldn't be too hard
-void _mgs(const uint nvec, const uint dimvec, cfp*restrict*restrict V, cfp*restrict*restrict Q){
-#define V (*V)
-#define Q (*Q)
-	uint i, j, k, ij, ik, jk;
-	fp norm, impt;
-	cfp*restrict tmp;
 
-	for(i = 0u; i < nvec; ++i){
-		//normalize V into Q
-		norm = ZERO;
-		for(j = 0u; j < dimvec; ++j){
-			ij = ACC2(dimvec, i, j);
-			norm += V[ij].re*V[ij].re + V[ij].im*V[ij].im;  ///V(i,j)* @ V(i,j)
-		}
-		norm = ONE / SQRT(norm);
-		for(j = 0u; j < dimvec; ++j){
-			ij = ACC2(dimvec, i, j);
-			Q[ij].re = V[ij].re * norm; Q[ij].im = V[ij].im * norm;
-		}
-
-		//orthogonalize all j > i to i in 0, ... , j
-		for(j = i + 1u; j < nvec; ++j){
-			norm = ZERO; impt = ZERO; ///treat as complex val = norm + i(impt)
-			///val = Q(i,k)* @ V(j,k)
-			for(k = 0u; k < dimvec; ++k){
-				ik = ACC2(dimvec, i, k);
-				jk = ACC2(dimvec, j, k);
-				norm += (Q[ik].re*V[jk].re + Q[ik].im*V[jk].im);
-				impt += (Q[ik].re*V[jk].im - Q[ik].im*V[jk].re);
-			}
-			///V(j, k) -= val @ Q(i,k)
-			for(k = 0u; k < dimvec; ++k){
-				ik = ACC2(dimvec, i, k);
-				jk = ACC2(dimvec, j, k);
-				V[jk].re -= (norm*Q[ik].re - impt*Q[ik].im);
-				V[jk].im -= (norm*Q[ik].im + impt*Q[ik].re);
-			}
-		}
-	}
-#undef V
-#undef Q
-	//now we're done, but we've updated Q instead of V ... just flip some
-	//pointers around and noone will know any better
-	tmp = *V; *V = *Q; *Q = tmp;
-}
 
 //recovers the "correct" eigenpairs e,v from (lam-eref)^2
 //fsm leavs v unaffected, so eigenvalues are the ones that best approximate
@@ -519,290 +473,10 @@ static void _fsmrecover(const hamil ham, const uint neig, const uint npw,
 			resim = WS[ij+j].im - lam2*v[i][j].im;
 			avg2 += resre*resre + resim*resim;
 		}
-															//printf(FPFORMAT" vs "FPFORMAT" ("FPFORMAT" vs "FPFORMAT")\n", lam1, lam2, avg1, avg2);
+
 		e[i] = (avg1 < avg2)? lam1 : lam2;
 	}
 }
-
-//Davidson iterative eigenpair solver for diagonally dominant hermitian 
-//matrices, specialized for electronic structure calculations (i.e. input is
-//a hamiltonian constructor as opposed to an explicit matrix)
-//too many parameters to write out here, read the comments in the source
-//code
-uchar dav(const uint n, const hamil ham,  	 
-		  //buffer params: V, Q, W = mbs x npw, psig* = fftdim[0]*[1]*[2]
-		  //               L = pointer-to-pointer mbs x mbs
-		  const uint mbs, 
-		  cfp*restrict V, cfp*restrict Q, cfp*restrict W, 
-		  cfp*restrict*restrict L,
-		  cfp*restrict psig1, cfp*restrict psig2,
-		  //initial guess params: V0 = initial guess for eigvec, dim v0rs x v0cs
-		  const uint v0rs, const uint v0cs, const cfp*restrict*restrict V0,
-		  //return params: e = rbs x 1 = vals, X = rbs x npw = vecs
-		  const uint rbs, ///(rbs is usually neigs)                                          
-		  fp*restrict e, cfp*restrict*restrict X,	
-		  //control params
-		  const uint fsm, const fp eref, const uint itrlim, const fp eps){
-//this is based on the version of the Davidson method given in section 3.1 of
-//'The Davidson Method' - Crouzeix et. al. (doi 10.1137/0915004) 
-//this version differs from the version in the text in the following ways:
-//1. it works for complex problems
-//2. step 1 of the algo changed from a matrix multiplication to a convolution
-//3. explicit calc / storage of the residuals is ditched (conv. criteria only
-//   based on eigenvalues)
-//4. lots (an almost worrying amount) of re-use of pre-allocated buffer space
-//   (i.e. the rayleigh matrix, the matrix of search directions, ... all use
-//   the same memory - see comments within)
-//5. it can handle the folded spectrum method ('Solving Schrodinger's Equation
-//   Around a Desired Energy: Application to Silicon Quantum Dots' - Wang &
-//   Zunger (doi 10.1063/1.466486))
-//6. it has been re-arranged to make as many calculations row-order friendly
-//   as I could manage.  the ritz vectors and search directions still have
-//   bad access patterns, though
-//that out of the way, the 'steps' that I refer to in the below comments will 
-//correspond to the numbered steps in the aformentioned algo 3.1 of Crouzeix
-
-	uint i, ii, j, ij, ji, ijp, k, ik, jk, kj, l; ///TODO: some of these arent needed ... actually a lot aren't needed
-	uint cbs, cnt;
-	fp norm, curre, laste, diffe;
-	cfp keavg2; fp vavgsc, pre;
-
-	//un-fixable errors (if any of these throw, work arrays are too small!)
-	if(n < rbs) return (uchar)2;
-	if(mbs < 2u*rbs) return(uchar)3;
-	if(n <= mbs) return (uchar)4;
-
-
-	//--------------------------//
-	//----- INITIALIZATION -----//
-	//--------------------------//
-	//set V ...
-	k = MIN(mbs, v0rs);
-	l = MIN(n, v0cs);
-	///... from V0 if possible ...
-	for(i = 0u; i < k; ++i){
-		for(j = 0u; j < l; ++j){
-			ij = ACC2(n, i, j);
-			V[ij].re = V0[i][j].re; V[ij].im = V0[i][j].im;
-		}
-	}
-	///... and fill the rest randomly ...
-	for(i = k; i < mbs; ++i){
-		for(j = l; j < n; ++j){
-			ij = ACC2(n, i, j);
-			V[ij].re = (fp)rand() / (fp)RAND_MAX;
-			V[ij].im = (fp)rand() / (fp)RAND_MAX;
-		}
-	}
-
-	///... and make sure its normalized
-	for(i = 0u; i < mbs; ++i){
-		norm = ZERO;
-		for(j = 0u; j < n; ++j){
-			ij = ACC2(n, i, j);
-			norm += V[ij].re*V[ij].re + V[ij].im*V[ij].im;
-		}
-		norm = ONE / SQRT(norm);
-		for(j = 0u; j < n; ++j){
-			ij = ACC2(n, i, j);
-			V[ij].re *= norm; V[ij].im *= norm;
-		}
-	}
-	/* technically, we should now guarentee that V is orthogonal. 
-	 * realistically, any reasonable guess of V will satisfy this, and the 
-	 * random init makes it _very_ likley that we'll satisfy the reqmnt.
-	 * (if we do decide to call MGS(V), we can skip the above normalization)
-	*/  
-
-	//a bit more stuff is needed if we're doing the folded spectrum method:
-	if(fsm){
-		///operate I @ eref on hamiltonian
-		for(i = 0u; i < n; ++i) ham.ke[i] -= eref;
-		///and setup the average real-space potential for preconditioning
-		///(scaled by eref)
-		i = (uint)ham.dims[0] * (uint)ham.dims[1] * (uint)ham.dims[2];
-		vavgsc = ZERO;
-		for(j = 0u; j < i; ++j) vavgsc += ham.vloc[j].re;
-		vavgsc = vavgsc/(fp)i - eref;
-	}
-
-
-	//--------------------------//
-	//------- MAIN  LOOP -------//
-	//--------------------------//
-	laste = ZERO;
-	for(cnt = 0u, cbs = rbs; cnt < itrlim; ++cnt, cbs += rbs){
-
-		//step 1: calculate H|psi> -> W through fft-like convolutions
-		if(fsm){
-			///apply H operator twice to mimic squaring the hamiltonian
-			///also use Q for the first calc since restricted pointers prohibit
-			///double-using W for the second part
-			for(i = 0u; i < cbs; ++i){
-				ij = i*n;
-				_action(ham.dims, ham.l2dims, ham.vloc, psig1, psig2, n, 
-						ham.mills, ham.ke, V + ij, Q + ij);
-				_action(ham.dims, ham.l2dims, ham.vloc, psig1, psig2, n, 
-						ham.mills, ham.ke, Q + ij, W + ij);
-			}
-		}
-		else{
-			///this is the 'normal' way of applying <psi| to H, nothing fancy
-			for(i = 0u; i < cbs; ++i){
-				ij = i*n;
-				_action(ham.dims, ham.l2dims, ham.vloc, psig1, psig2, n, 
-						ham.mills, ham.ke, V + ij, W + ij);
-			}
-		}
-
-		//step 2: calculate the rayleigh matrix -> Q (cbs x cbs)
-		//H is hermitian, so this is a bit more complicated than the normal
-		//matrix product formula.  can this be done with FFTs?  maybe worth
-		//checking out ...
-		for(i = 0u; i < cbs; ++i){
-			ii = ACC2(cbs, i, i);
-			Q[ii].re = ZERO; Q[ii].im = ZERO;
-			///init diags
-			for(j = 0u; j < n; ++j){
-				ij = ACC2(n, i, j);
-				Q[ii].re += (V[ij].re*W[ij].re + V[ij].im*W[ij].im);
-				Q[ii].im += (V[ij].re*W[ij].im - V[ij].im*W[ij].re);
-			}
-			///the rest of the matrix
-			for(j = i+1u; j < cbs; ++j){
-				ij = ACC2(cbs, i, j);
-				Q[ij].re = ZERO; Q[ij].im = ZERO;
-				for(k = 0u; k < n; ++k){
-					ik = ACC2(n, i, k); jk = ACC2(n, j, k);
-					Q[ij].re += (V[ik].re*W[jk].re + V[ik].im*W[jk].im);
-					Q[ij].im += (V[ik].re*W[jk].im - V[ik].im*W[jk].re);
-				}
-				ji = ACC2(cbs, j, i);
-				Q[ji].re = Q[ij].re; Q[ji].im = -Q[ij].im;
-			}
-		}
-
-		//step 3: calculate the eigenpairs of the rayleigh matrix
-		//qrh already sorts the vals and vecs
-		qrh(cbs, Q, e, L, DEF_QR_ITRLIM, eps*(fp)0.001, (uchar)1);
-
-		//step 4: get ritz vectors (approx. eigvecs of H, in-line w/ evalues)
-		for(i = 0u; i < rbs; ++i){
-			for(j = 0u; j < n; ++j){
-				X[i][j].re = ZERO; X[i][j].im = ZERO;
-				for(k = 0u; k < cbs; ++k){
-					kj = ACC2(n, k, j);
-					X[i][j].re += (L[i][k].re*V[kj].re - L[i][k].im*V[kj].im);
-					X[i][j].im += (L[i][k].re*V[kj].im + L[i][k].im*V[kj].re);
-				}
-			}
-		}
-
-		//step 5: convergence check (w/o ritz vectors)
-		curre = ZERO;
-		for(i = 0u; i < rbs; ++i){
-			curre += e[i];
-		}
-		curre /= (fp)rbs;
-		if(cnt){
-			diffe = ABSF(laste - curre);
-			printf("(step = %04u  dE = %0.2e)\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b", cnt, diffe);
-			if(diffe < eps) break;
-		}
-		laste = curre;
-
-		//step 5/6: calculate new search directions -> Q
-		//in previous testing, i found that davidson's original preconditioner
-		//was much better than, say, the diagonals + the row above/below them
-		//(the inverse of which has a closed, relativly easy-to-compute form)
-		//this may be different since previous testing was done in python which
-		//is much slower than this and also only has double-point prec.  in case
-		//of numerical problems, using the tridiagonal preconditioner may be
-		//necessary
-		///folded spectrum preconditioner (TODO: this is technically incorrect !!! see lobcg implementation)
-		if(fsm){
-			for(i = 0u; i < rbs; ++i){
-				///calculate the this wavefunction's average kinetic energy
-				keavg2.re = ZERO; keavg2.im = ZERO;
-				for(j = 0u; j < n; ++j){
-					keavg2.re += X[i][j].re * (ham.ke[j] + eref);
-					keavg2.im += X[i][j].im * (ham.ke[j] + eref);
-				}
-				keavg2.re = (keavg2.re*keavg2.re + keavg2.im*keavg2.im) / (fp)n;
-				keavg2.re = 3.5;
-				for(j = 0u; j < n; ++j){
-					ij = ACC2(n, i, j);
-					Q[ij].re = e[i]*X[i][j].re; Q[ij].im = e[i]*X[i][j].im;
-					for(k = 0u; k < cbs; ++k){
-						kj = ACC2(n, k, j);
-						Q[ij].re -= (L[i][k].re*W[kj].re - L[i][k].im*W[kj].im);
-						Q[ij].im -= (L[i][k].re*W[kj].im + L[i][k].im*W[kj].re);
-					}
-					pre = keavg2.re / ((ham.la[j]+vavgsc)*(ham.la[j]+vavgsc) + 
-									    keavg2.re); ///~ 1/(H-eref)^2
-					Q[ij].re *= pre;
-					Q[ij].im *= pre;
-				}
-			}
-		}
-		///normal preconditioner
-		else{
-			for(i = 0u; i < rbs; ++i){
-				for(j = 0u; j < n; ++j){
-					ij = ACC2(n, i, j);
-					Q[ij].re = e[i]*X[i][j].re; Q[ij].im = e[i]*X[i][j].im;
-					for(k = 0u; k < cbs; ++k){
-						kj = ACC2(n, k, j);
-						Q[ij].re -= (L[i][k].re*W[kj].re - L[i][k].im*W[kj].im);
-						Q[ij].im -= (L[i][k].re*W[kj].im + L[i][k].im*W[kj].re);
-					}
-					Q[ij].re /= (e[i] - ham.ke[j]);
-					Q[ij].im /= (e[i] - ham.ke[j]);
-				}
-			}
-		}
-
-
-		//step 7: increase basis or restart
-		if(cbs + rbs < mbs){ 
-			///increase basis size by rbs
-			for(i = 0u; i < rbs; ++i){
-				for(j = 0u; j < n; ++j){
-					ijp = ACC2(n, cbs+i, j); ij = ACC2(n, i, j);
-					V[ijp].re = Q[ij].re; V[ijp].im = Q[ij].im; ///TODO: might be able to memcpy Q -> V, but it'd be messy 
-				}
-			}
-			_mgs(cbs+rbs, n, &V, &Q);	
-		}
-		else{ 
-			///restart back to 2*rbs
-			cbs = rbs; ///loop itr takes care of the rest of the cbs update
-			for(i = 0u; i < rbs; ++i){
-				for(j = 0u; j < n; ++j){
-					ijp = ACC2(n, rbs+i, j); ij = ACC2(n, i, j);
-					V[ij].re  = X[i][j].re; V[ij].im  = X[i][j].im;
-					V[ijp].re = Q[ij].re;   V[ijp].im = Q[ij].im; ///TODO: might be able to memcpy Q -> V, but it'd be messy 
-				}
-			}
-			_mgs(2u*rbs, n, &V, &Q);
-		}
-	}
-
-
-	//recover actual eigenvalues from folded  ones if necessary
-	if(fsm){
-		for(i = 0u; i < n; ++i) ham.ke[i] += eref; ///undo the fsm		
-		_fsmrecover(ham, rbs, n, eref, W, psig1, psig2, e, 
-					(const cfp*restrict*restrict)X);
-		_epairsort(rbs, &e, &X, (uchar)1);
-	}
-
-	if(cnt == itrlim) return (uchar)1;
-	return (uchar)0; 
-}
-
-
-
 
 
 
@@ -952,17 +626,9 @@ static forceinline void _lcgpdia(const uint npw,
 //Wang, Zunger = "Solving Schrodinger's Equation around a desired energy: 
 //application to Si QDs" - Jrn. of Chem Phys, 1994 
 //with alpha = <T>
-#define PRECTEST 1
-#if PRECTEST
+#if (!USE_BAD_PRECONDITIONER)
 static forceinline void _lcgpfsm(const uint npw, const fp*restrict kesc, 
 								 const cfp*restrict psi, fp*restrict T){	
-#else
-static forceinline void _lcgpfsm(const uint npw, const fp eref, 
-								 const fp*restrict kesc, const fp*restrict la,
-								 const fp vavgsc, const cfp*restrict psi,
-								 fp*restrict T){
-#endif
-#if PRECTEST ///why does this work so well vs. the original??
 	uint i;
 	fp ttot, x, x3, fac;
 
@@ -980,7 +646,13 @@ static forceinline void _lcgpfsm(const uint npw, const fp eref,
 		fac = (fp)27 + ((fp)18 + (fp)12*x)*x + (fp)8*x3;
 		T[i] = fac / (fac + (fp)16*x*x3);
 	}
-#else
+}
+#endif
+#if USE_BAD_PRECONDITIONER
+static forceinline void _lcgpfsm(const uint npw, const fp eref, 
+								 const fp*restrict kesc, const fp*restrict la,
+								 const fp vavgsc, const cfp*restrict psi,
+								 fp*restrict T){
 	uint i;
 	fp tavg2;
 
@@ -996,8 +668,9 @@ static forceinline void _lcgpfsm(const uint npw, const fp eref,
 	for(i = 0u; i < npw; ++i){
 		T[i] = tavg2 / ((la[i]+vavgsc)*(la[i]+vavgsc) + tavg2);
 	}
-#endif
 }
+#endif
+
 
 //grahm schmidt orthogonalization for the triplet of basis vectors in LOPCG
 //the new search directions (Wi) are NOT normalized, the current
@@ -1101,10 +774,16 @@ static void _lcgogs(const uint neig, const uint npw,
 	}
 }
 
+
+
+
+
+
 //rayleigh-ritz procedure on {Wi, Xi, Xm}
 static forceinline void _lcgritzh(const uint n, 
-								  const cfp*restrict a, const cfp*restrict b,
-								  cfp*restrict res){
+								  const cfp*const restrict a, 
+								  const cfp*const restrict b,
+								  cfp*const restrict res){
 	uint i;
 	fp rre, rim; ///gcc 4.x WON'T VECTORIZE THIS LOOP if 'res' is used or 
 				 ///these local variables are replaced with a single 'cfp' var
@@ -1117,16 +796,16 @@ static forceinline void _lcgritzh(const uint n,
 	res->re = rre;
 	res->im = rim;
 }
-static void _lcgritz(const uint neig, const uint npw, 
-					 const cfp*restrict Wi, const cfp*restrict WiH, 
-					 const cfp*restrict Xi, const cfp*restrict XiH,
-					 const cfp*restrict Xm, const cfp*restrict XmH,
-					 const uint nlocked, uchar*restrict lockedu, 
-					 fp*restrict lockedf,
-					 cfp*restrict rH, cfp*restrict rS, fp*restrict re,
-					 cfp*restrict*restrict rX, 
-					 fp*restrict e, cfp*restrict*restrict X, 
-					 const fp qreps){
+static uchar _lcgritz(const uint neig, const uint npw, 
+					  const cfp*restrict Wi, const cfp*restrict WiH, 
+					  const cfp*restrict Xi, const cfp*restrict XiH,
+					  const cfp*restrict Xm, const cfp*restrict XmH,
+					  const uint nlocked, uchar*restrict lockedu, 
+					  fp*restrict lockedf,
+					  cfp*restrict rH, cfp*restrict rS, fp*restrict re,
+					  cfp*restrict*restrict rX, 
+					  fp*restrict e, cfp*restrict*restrict X, 
+					  const fp qreps){
 	uint i, j, k, ii, jj, ij, ik, jk;
 	uint c0, c1;
 	uint n1, n2, n3;
@@ -1235,8 +914,11 @@ static void _lcgritz(const uint neig, const uint npw,
 			ij = ACC2(n3, i, j);
 			su.re += rS[ij].re*rS[ij].re + rS[ij].im*rS[ij].im;
 		}
-if(rS[ii].re - su.re < ZERO) printf("god damn it "FPFORMAT" "FPFORMAT"\n", rS[ii].re , su.re);
-		rS[ii].re = SQRT(rS[ii].re - su.re);
+		su.re = rS[ii].re - su.re;
+		if(su.re <= ZERO){ ///damn floating point errors - signal to restart
+			return (uchar)1;
+		}
+		rS[ii].re = SQRT(su.re);
 		rS[ii].im = ZERO; ///may be unnecessary
 	}
 	///rH -> X, but only 1/2 of X is needed (solve L@X = rH for X)
@@ -1277,7 +959,7 @@ if(rS[ii].re - su.re < ZERO) printf("god damn it "FPFORMAT" "FPFORMAT"\n", rS[ii
 	}
 	///now, the eigenvalue problem is transformed.  solve it ... 
 //for(int h = 0; h < n3*n3; ++h) printf("%i "FPFORMAT" "FPFORMAT"\n",h, rH[h].re, rH[h].im);
-	uchar ghahah = qrh(n3, rH, re, rX, DEF_QR_ITRLIM, qreps, (uchar)1);
+	qrh(n3, rH, re, rX, DEF_QR_ITRLIM, qreps, (uchar)1);
 	///... but the vectors are still transformed.  need to get them back:
 	for(i = n3; i --> 0u ;){ 	  ///unsigned ints and counting backwards,
 		for(j = n3; j --> 0u ;){  ///what could go wrong?
@@ -1341,36 +1023,45 @@ if(rS[ii].re - su.re < ZERO) printf("god damn it "FPFORMAT" "FPFORMAT"\n", rS[ii
 		c0++;
 	}
 	for(i = 0u; i < neig; ++i) lockedu[i] = (uchar)(!lockedu[i]); ///unlck->lck
+
+	return (uchar)0;
 }
+
 
 //update convergence info for lopcg.  returns 1 if all eigenvalues are converged
 //to tol
-static int _lcgupdateconv(const uint neigs, const fp*restrict ecurr,
-						   fp*restrict eprev, fp*restrict ediff, 
-						   uint*restrict nlocked, uchar*restrict locked,
-						   const uchar stab, const fp tol){
+static int _lcgupdateconv(const uint neigs, const uint step, const uint nsteps, 
+						  const fp*restrict ecurr, fp*restrict eprev, 
+						  uint*restrict nlocked, uchar*restrict locked,
+						  const uchar stab, const fp tol){
 	uint i;
 	int ret;
-	fp avgdiffs;
+	fp curdiff, avgdiff;
 
 	//update lockes
-	avgdiffs = ZERO;
+	avgdiff = ZERO;
 	for(i = 0u; i < neigs; ++i){
 		if(locked[i]) continue;
-		ediff[i] = ABSF(ecurr[i] - eprev[i]);
-		if(ediff[i] < tol){
+		curdiff = ABSF(ecurr[i] - eprev[i]);
+		if(curdiff < tol){
 			(*nlocked)++;
 			locked[i] = (uchar)1;
 		}
 		else{
-			avgdiffs += ediff[i];
+			avgdiff += curdiff; 
 		}
 	}
 
 	//update previous eigenvalue approximations
 	for(i = 0u; i < neigs; ++i) eprev[i] = ecurr[i];
 
-	printf(" ncon: %u / %u ... dE(uncon) = "FPFORMAT" eV\n", *nlocked, neigs, avgdiffs/(fp)(neigs - *nlocked));
+	//print progress
+	fputs("\33[2K\r", stdout); ///clears entire line (S.O. #1508490)
+	printf(" (%u / %u)  ncon: %u / %u   dE(ucon) = "FPFORMAT" meV", 
+		   step, nsteps, *nlocked, neigs, 
+		   (fp)1000.0*avgdiff/(fp)(neigs - *nlocked));
+	fflush(stdout);
+
 	ret = (neigs == *nlocked);
 
 	//if we're trying to be very careful, we leave all vectors unlocked.  here,
@@ -1391,7 +1082,7 @@ static int _lcgupdateconv(const uint neigs, const fp*restrict ecurr,
 //the following must be allocated prior to use:
 // ---workspace---
 //  (neigs) * sizeof(uchar)                                           b for IWS
-//  (6*neig + npw) * sizeof(fp)                                       b for RWS
+//  (5*neig + npw) * sizeof(fp)                                       b for RWS
 //  (18*neig*neig + 6*neig*npw + npw + 2*fftgridsize) * sizeof(cfp)   b for CWS
 //  (3*neigs) * sizeof(cfp) x (3*neigs) * sizeof(cfp)                 b for CCWS
 // ---return values---
@@ -1410,14 +1101,17 @@ uchar lcg(const uint neig, const uint n, const hamil ham,
 		  const uchar stab){
 
 	uint i, j, ii, ij, cnt;
-	fp vavgsc, lam;
+#if(USE_BAD_PRECONDITIONER)
+	fp vavgsc;
+#endif
+	fp lam;
 	cfp*restrict Wi,  *restrict Xi,  *restrict Xm;
 	cfp*restrict WiH, *restrict XiH, *restrict XmH, *restrict BuH;
 	cfp*restrict psigrid1, *restrict psigrid2;
 	fp*restrict T;
 	cfp*restrict HR, *restrict SR; fp*restrict er; cfp*restrict*restrict vr;
 	uint nlocks; uchar*restrict lockedu; fp*restrict lockedf;
-	fp*restrict eprev, *restrict ediff; 
+	fp*restrict eprev; 
 
 #define ACTIONNRM(PSI, PSIH) do{_action(ham.dims, ham.l2dims, ham.vloc,\
 										psigrid1, psigrid2, n, ham.mills,\
@@ -1428,6 +1122,8 @@ uchar lcg(const uint neig, const uint n, const hamil ham,
 								_action(ham.dims, ham.l2dims, ham.vloc,\
 										psigrid1, psigrid2, n, ham.mills,\
 										ham.ke, BuH, PSIH);} while(0)
+//memset(RWS, 0, (5*neig + n)*sizeof(fp));
+//memset(CWS, 0, (18*neig*neig + 6*neig*n + n + 2u*ham.dims[0]*ham.dims[1]*ham.dims[2])*sizeof(cfp));
 
 	//workspace setup
 	ij = neig*n;
@@ -1444,23 +1140,23 @@ uchar lcg(const uint neig, const uint n, const hamil ham,
 	er = RWS + 0; vr = CCWS;
 	///preconditioner: real workspace += npw
 	T = er + 3u*neig;
-	///convergence checking: real wkspce += 2*neig
-	eprev = T + n; ediff = eprev + neig;	
+	///convergence checking: real wkspce += 1*neig
+	eprev = T + n; 	
 	///locking: real wkspce += neig, uchar wkspce 0 -> neig
-	lockedf = ediff + neig; lockedu = IWS + 0;
+	lockedf = eprev + neig; lockedu = IWS + 0;
 
 
 	//init (set locks, basis vectors, apply hamiltonian when needed)
 	//plus a bit of exra setup is required if we're doing fsm
+	if(fsm) for(i = 0u; i < n; ++i) ham.ke[i] -= eref;
+#if (USE_BAD_PRECONDITIONER)
 	if(fsm){
-		for(i = 0u; i < n; ++i) ham.ke[i] -= eref;
-#if (!PRECTEST)
 		vavgsc = ZERO;
 		ij = (uint)(ham.dims[0]) * (uint)(ham.dims[1]) * (uint)(ham.dims[2]);
 		for(i = 0u; i < ij; ++i) vavgsc += ham.vloc[i].re;
 		vavgsc = vavgsc/(fp)ij - eref;
-#endif
 	}
+#endif
 	_lcginit(stab, fsm, neig, n, &nlocks, lockedu, v0rs, v0cs, V0, 
 			 Xi, Xm, XmH, BuH, ham, psigrid1, psigrid2);
 
@@ -1473,9 +1169,10 @@ uchar lcg(const uint neig, const uint n, const hamil ham,
 			if(lockedu[i]) continue;
 			if(fsm){
 				ACTIONFSM(Xi+ii, XiH+ii);
-#if PRECTEST
+#if (!USE_BAD_PRECONDITIONER)
 				_lcgpfsm(n, ham.ke, Xi+ii, T);
-#else
+#endif
+#if USE_BAD_PRECONDITIONER
 				_lcgpfsm(n, eref, ham.ke, ham.la, vavgsc, Xi+ii, T);
 #endif
 			} 
@@ -1522,8 +1219,13 @@ uchar lcg(const uint neig, const uint n, const hamil ham,
 		}
 
 		//ray-ritz on the trial subspaces
-		_lcgritz(neig, n, Wi, WiH, Xi, XiH, Xm, XmH, nlocks, lockedu, lockedf,
-				 HR, SR, er, vr, e, X, /*DEF_QR_EPS*/(fp)0.001*eps);
+		if(_lcgritz(neig, n, Wi, WiH, Xi, XiH, Xm, XmH, 
+					nlocks, lockedu, lockedf, HR, SR, er, vr, 
+					e, X, /*DEF_QR_EPS*/(fp)0.001*eps)){
+			_lcginit(stab, fsm, neig, n, &nlocks, lockedu, v0rs, v0cs, V0, 
+					 Xi, Xm, XmH, BuH, ham, psigrid1, psigrid2);
+			continue;
+		}
 
 		//with no orthog, we can skip an application of <psi|H*
 		if(!stab){
@@ -1533,10 +1235,11 @@ uchar lcg(const uint neig, const uint n, const hamil ham,
 			}
 		}
 
-		printf("step %u / %u :", cnt, itrlim);
 		//termination conditions, update locks
-		if(_lcgupdateconv(neig, e, eprev, ediff, &nlocks, lockedu, stab, eps))
+		if(_lcgupdateconv(neig, cnt, itrlim, e, eprev, &nlocks, lockedu, 
+						  stab, eps)){
 			break;
+		}
 
 		//prep for next iteration
 		for(i = 0u, ii = 0u; i < neig; ++i, ii += n){
@@ -1553,7 +1256,7 @@ uchar lcg(const uint neig, const uint n, const hamil ham,
 		for(i = 0u; i < n; ++i) ham.ke[i] += eref; ///undo the fsm		
 		_fsmrecover(ham, neig, n, eref, Wi, psigrid1, psigrid2, e, 
 					(const cfp*restrict*restrict)X);
-		_epairsort(neig, &e, &X, (uchar)1);
+		//_epairsort(neig, &e, &X, (uchar)1);
 	}	
 
 #undef ACTIONNRM
